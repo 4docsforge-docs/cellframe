@@ -207,6 +207,7 @@ int dap_chain_mempool_tx_create_massive( dap_chain_t * a_chain, dap_enc_key_t *a
                                                                              a_addr_from, l_value_need, &l_value_transfer);
     if (!l_list_used_out) {
         log_it(L_WARNING,"Not enough funds to transfer");
+        DAP_DELETE(l_objs);
         return -2;
     }
 
@@ -245,6 +246,7 @@ int dap_chain_mempool_tx_create_massive( dap_chain_t * a_chain, dap_enc_key_t *a
             log_it(L_ERROR,"Not enought values on output %llu to produce enought ins %llu when need %llu",
                    l_value_to_items, l_value_transfer,
                    l_value_need);
+            DAP_DELETE(l_objs);
             return -5;
         }
 
@@ -802,7 +804,6 @@ dap_datum_mempool_t * dap_datum_mempool_deserialize(uint8_t *a_datum_mempool_ser
         shift_size += size_one;
     }
     assert(shift_size == a_datum_mempool_ser_size);
-    DAP_DELETE(a_datum_mempool_ser);
     return datum_mempool;
 }
 
@@ -920,8 +921,7 @@ void chain_mempool_proc(struct dap_http_simple *cl_st, void * arg)
             dap_datum_mempool_t *datum_mempool =
                     (action != DAP_DATUM_MEMPOOL_NONE) ?
                             dap_datum_mempool_deserialize((uint8_t*) request_str, (size_t) request_size) : NULL;
-            if(datum_mempool)
-            {
+            if(datum_mempool){
                 dap_datum_mempool_free(datum_mempool);
                 char *a_key = calc_datum_hash(request_str, (size_t) request_size);
                 switch (action)
@@ -935,7 +935,7 @@ void chain_mempool_proc(struct dap_http_simple *cl_st, void * arg)
                     }
                     log_it(L_INFO, "Insert hash: key=%s result:%s", a_key,
                             (*return_code == Http_Status_OK) ? "OK" : "False!");
-                    DAP_DELETE(a_key);
+                    DAP_DEL_Z(a_key);
                     break;
 
                 case DAP_DATUM_MEMPOOL_CHECK: // check datum in base
@@ -945,7 +945,7 @@ void chain_mempool_proc(struct dap_http_simple *cl_st, void * arg)
                             dap_config_get_item_str_default(g_config, "mempool", "gdb_group", "datum-pool"));
                     if(str) {
                         dg->response = strdup("1");
-                        DAP_DELETE(str);
+                        DAP_DEL_Z(str);
                         log_it(L_INFO, "Check hash: key=%s result: Present", a_key);
                     }
                     else
@@ -977,16 +977,18 @@ void chain_mempool_proc(struct dap_http_simple *cl_st, void * arg)
 
                 default: // unsupported command
                     log_it(L_INFO, "Unknown request=%s! key=%s", (suburl) ? suburl : "-", a_key);
-                    DAP_DELETE(a_key);
+                    DAP_DEL_Z(a_key);
                     enc_http_delegate_delete(dg);
                     if(key)
                         dap_enc_key_delete(key);
                     return;
                 }
-                DAP_DELETE(a_key);
-            }
-            else
+                DAP_DEL_Z(a_key);
+            } else{
                 *return_code = Http_Status_BadRequest;
+            }
+
+            DAP_DELETE(request_str);
         }
         else
             *return_code = Http_Status_BadRequest;

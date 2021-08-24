@@ -41,10 +41,13 @@ static void s_stage_done_delete(dap_client_t * a_client, void * a_arg);
 int dap_client_init()
 {
     static bool s_is_first_time=true;
-    if (s_is_first_time ){
+    if (s_is_first_time ) {
+        int err = 0;
         log_it(L_INFO, "Init DAP client module");
         dap_http_client_init();
-        dap_client_http_init();
+        err = dap_client_http_init();
+        if (err)
+            return err;
         dap_client_pvt_init();
         s_is_first_time = false;
     }
@@ -240,8 +243,6 @@ static void s_go_stage_on_client_worker_unsafe(dap_worker_t * a_worker,void * a_
             l_client_pvt->is_to_delete = true;
         return;
     }
-
-
 
     dap_client_stage_t l_cur_stage = l_client_pvt->stage;
     dap_client_stage_status_t l_cur_stage_status= l_client_pvt->stage_status;
@@ -604,6 +605,7 @@ const char * dap_client_get_stream_id(dap_client_t * a_client)
  */
 bool dap_client_get_is_always_reconnect(dap_client_t * a_client)
 {
+    assert(a_client);
     return DAP_CLIENT_PVT(a_client)->is_always_reconnect;
 }
 
@@ -614,6 +616,7 @@ bool dap_client_get_is_always_reconnect(dap_client_t * a_client)
  */
 void dap_client_set_is_always_reconnect(dap_client_t * a_client, bool a_value)
 {
+    assert(a_client);
     DAP_CLIENT_PVT(a_client)->is_always_reconnect = a_value;
 }
 
