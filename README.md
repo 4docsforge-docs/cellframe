@@ -1,2 +1,2 @@
 # cellframe
-demlabs cellframe docs
+DemLabs Cellframe software development kit

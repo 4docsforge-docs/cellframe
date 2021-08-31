@@ -143,6 +143,7 @@ typedef struct dap_events_socket_callbacks {
 } dap_events_socket_callbacks_t;
 
 #define DAP_EVENTS_SOCKET_BUF 100000
+#define DAP_QUEUE_MAX_MSGS 8
 
 typedef enum {
     DESCRIPTOR_TYPE_SOCKET_CLIENT = 0,
@@ -282,13 +283,13 @@ typedef struct dap_events_socket {
 
 #define SSL(a) (a ? (WOLFSSL *) (a)->_pvt : NULL)
 
-typedef struct dap_events_socket_handler{
+typedef struct dap_events_socket_uuid_w_data{
     dap_events_socket_uuid_t esocket_uuid;
     struct {
         uint64_t value; // some custom data
         void * ptr;
     };
-} dap_events_socket_handle_t;
+} dap_events_socket_uuid_w_data_t;
 
 
 

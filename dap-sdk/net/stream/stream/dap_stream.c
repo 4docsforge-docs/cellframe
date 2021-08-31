@@ -414,7 +414,7 @@ static void s_http_client_headers_write(dap_http_client_t * a_http_client, void 
         // Connection is established, setting up keepalive timer
         dap_events_socket_uuid_t * l_es_uuid= DAP_NEW_Z(dap_events_socket_uuid_t);
         *l_es_uuid = a_http_client->esocket->uuid;
-        dap_timerfd_start(STREAM_KEEPALIVE_TIMEOUT * 1000, (dap_timerfd_callback_t)s_callback_keepalive, l_es_uuid);
+        dap_timerfd_start_on_worker(a_http_client->esocket->worker, STREAM_KEEPALIVE_TIMEOUT * 1000, s_callback_keepalive, l_es_uuid);
 
     }
 }
@@ -445,7 +445,7 @@ static void s_esocket_callback_worker_assign(dap_events_socket_t * a_esocket, da
     if(a_esocket->type == DESCRIPTOR_TYPE_SOCKET_UDP){
         dap_events_socket_uuid_t * l_es_uuid= DAP_NEW_Z(dap_events_socket_uuid_t);
         *l_es_uuid = a_esocket->uuid;
-        dap_timerfd_start(STREAM_KEEPALIVE_TIMEOUT * 1000, (dap_timerfd_callback_t)s_callback_keepalive, l_es_uuid);
+        dap_timerfd_start_on_worker(a_worker,STREAM_KEEPALIVE_TIMEOUT * 1000, (dap_timerfd_callback_t)s_callback_keepalive, l_es_uuid);
     }else {
         dap_http_client_t *l_http_client = DAP_HTTP_CLIENT(a_esocket);
         assert(l_http_client);
@@ -455,7 +455,7 @@ static void s_esocket_callback_worker_assign(dap_events_socket_t * a_esocket, da
         if(l_http_client->state_read == DAP_HTTP_CLIENT_STATE_DATA && l_http_client->state_write == DAP_HTTP_CLIENT_STATE_DATA ){
             dap_events_socket_uuid_t * l_es_uuid= DAP_NEW_Z(dap_events_socket_uuid_t);
             *l_es_uuid = a_esocket->uuid;
-            dap_timerfd_start(STREAM_KEEPALIVE_TIMEOUT * 1000, (dap_timerfd_callback_t)s_callback_keepalive, l_es_uuid);
+            dap_timerfd_start_on_worker(a_worker, STREAM_KEEPALIVE_TIMEOUT * 1000, (dap_timerfd_callback_t)s_callback_keepalive, l_es_uuid);
         }
     }
 }
@@ -623,6 +623,10 @@ size_t dap_stream_data_proc_read (dap_stream_t *a_stream)
         }else{
             read_bytes_to=bytes_left_to_read;
         }
+        if (a_stream->pkt_buf_in_data_size + read_bytes_to > a_stream->pkt_buf_in_size_expected) {
+            a_stream->pkt_buf_in_size_expected = a_stream->pkt_buf_in_data_size + read_bytes_to;
+            a_stream->pkt_buf_in = (dap_stream_pkt_t *)DAP_REALLOC(a_stream->pkt_buf_in, a_stream->pkt_buf_in_size_expected);
+        }
         memcpy((uint8_t*)a_stream->pkt_buf_in+a_stream->pkt_buf_in_data_size,proc_data,read_bytes_to);
         a_stream->pkt_buf_in_data_size+=read_bytes_to;
         bytes_left_to_read-=read_bytes_to;
@@ -664,14 +668,13 @@ size_t dap_stream_data_proc_read (dap_stream_t *a_stream)
      //   log_it(DEBUG,"No prefill or defrag buffer, process directly buf_in");
     // Now lets see how many packets we have in buffer now
     while ( (pkt = dap_stream_pkt_detect( proc_data , bytes_left_to_read)) ){
-        if(bytes_left_to_read -((byte_t*)pkt- proc_data  ) >=sizeof (dap_stream_pkt_t)){
-            if(pkt->hdr.size > STREAM_PKT_SIZE_MAX ){
-                //log_it(L_ERROR, "stream_pkt_detect() Too big packet size %u",
-                //       pkt->hdr.size);
-                bytes_left_to_read=0;
-                break;
-            }
+        if(pkt->hdr.size > STREAM_PKT_SIZE_MAX ){
+            //log_it(L_ERROR, "stream_pkt_detect() Too big packet size %u",
+            //       pkt->hdr.size);
+            bytes_left_to_read=0;
+            break;
         }
+
         size_t pkt_offset=( ((uint8_t*)pkt)- proc_data );
         bytes_left_to_read -= pkt_offset ;
         found_sig=true;

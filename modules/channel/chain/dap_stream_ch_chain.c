@@ -397,7 +397,7 @@ static bool s_sync_out_gdb_proc_callback(dap_proc_thread_t *a_thread, void *a_ar
     // Get log diff
     uint64_t l_local_last_id = dap_db_log_get_last_id();
     if (s_debug_more)
-        log_it(L_DEBUG, "Sync out gdb proc, requested transactions %llu:%llu from address "NODE_ADDR_FP_STR,
+        log_it(L_DEBUG, "Sync out gdb proc, requested transactions %"DAP_UINT64_FORMAT_u":%"DAP_UINT64_FORMAT_u" from address "NODE_ADDR_FP_STR,
                             l_sync_request->request.id_start, l_local_last_id, NODE_ADDR_FP_ARGS_S(l_sync_request->request.node_addr));
     uint64_t l_start_item = l_sync_request->request.id_start;
     // If the current global_db has been truncated, but the remote node has not known this
@@ -705,6 +705,9 @@ static bool s_gdb_in_pkt_proc_callback(dap_proc_thread_t *a_thread, void *a_arg)
             dap_store_obj_free(l_store_obj, l_data_obj_count);
     } else {
         log_it(L_WARNING, "In proc thread got GDB stream ch packet with zero data");
+    }
+    if (l_pkt_item->pkt_data) {
+        DAP_DELETE(l_pkt_item->pkt_data);
     }
     DAP_DELETE(l_sync_request);
     return true;
@@ -1372,7 +1375,7 @@ void s_stream_ch_packet_out(dap_stream_ch_t* a_ch, void* a_arg)
                     // free log list
                     dap_db_log_list_delete(l_ch_chain->request_global_db_trs);
                     l_ch_chain->request_global_db_trs = NULL;
-                    log_it( L_INFO,"Syncronized database:  last id %llu, items syncronyzed %llu ", dap_db_log_get_last_id(),
+                    log_it( L_INFO,"Syncronized database:  last id %"DAP_UINT64_FORMAT_U", items syncronyzed %"DAP_UINT64_FORMAT_U" ", dap_db_log_get_last_id(),
                         l_ch_chain->stats_request_gdb_processed );
                     // last message
                     dap_stream_ch_chain_sync_request_t l_request = {};
@@ -1483,7 +1486,7 @@ void s_stream_ch_packet_out(dap_stream_ch_t* a_ch, void* a_arg)
                 dap_stream_ch_chain_pkt_write_unsafe(a_ch, DAP_STREAM_CH_CHAIN_PKT_TYPE_SYNCED_CHAINS,
                                                      l_ch_chain->request_hdr.net_id.uint64, l_ch_chain->request_hdr.chain_id.uint64,
                                                      l_ch_chain->request_hdr.cell_id.uint64, &l_request, sizeof(l_request));
-                log_it( L_INFO,"Synced: %llu atoms processed", l_ch_chain->stats_request_atoms_processed);
+                log_it( L_INFO,"Synced: %"DAP_UINT64_FORMAT_u" atoms processed", l_ch_chain->stats_request_atoms_processed);
                 dap_stream_ch_chain_go_idle(l_ch_chain);
                 if (l_ch_chain->callback_notify_packet_out)
                     l_ch_chain->callback_notify_packet_out(l_ch_chain, DAP_STREAM_CH_CHAIN_PKT_TYPE_SYNCED_CHAINS, NULL,
