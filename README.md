@@ -1,5 +1,5 @@
 # cellframe
 
-![](images/image001.jpg)
+![](images/image001.png)
 
 DemLabs Cellframe software development kit
