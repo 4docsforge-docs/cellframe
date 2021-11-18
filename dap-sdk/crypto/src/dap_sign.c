@@ -276,7 +276,7 @@ uint8_t* dap_sign_get_sign(dap_sign_t *a_sign, size_t *a_sign_out)
     if(!a_sign)
         return NULL;
     if(a_sign_out)
-    *a_sign_out = a_sign->header.sign_size;
+        *a_sign_out = a_sign->header.sign_size;
     return a_sign->pkey_n_sign + a_sign->header.sign_pkey_size;
 }
 
@@ -320,8 +320,6 @@ bool dap_sign_verify_size(dap_sign_t *a_sign, size_t a_max_key_size)
     if (a_sign->header.sign_pkey_size > a_max_key_size)
         return false;
     if (a_sign->header.sign_size > a_max_key_size)
-        return false;
-    if (a_sign->header.sign_pkey_size > a_sign->header.sign_size)
         return false;
     return true;
 }
@@ -377,7 +375,6 @@ int dap_sign_verify(dap_sign_t * a_chain_sign, const void * a_data, const size_t
     if ( ! l_sign_data ){
         log_it(L_WARNING,"Incorrect signature, can't deserialize signature's data");
         dap_enc_key_delete(l_key);
-        dap_enc_key_signature_delete(l_key->type, l_sign_data);
         return -5;
     }
 

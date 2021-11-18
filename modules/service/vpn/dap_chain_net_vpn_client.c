@@ -160,7 +160,7 @@ static dap_chain_hash_fast_t* dap_chain_net_vpn_client_tx_cond_hash(dap_chain_ne
     }
     // If loaded lets check is it spent or not
     if(l_tx_cond_hash) {
-        log_it(L_DEBUG, "2791: Search for unspent tx, net %s", a_net);
+        log_it(L_DEBUG, "2791: Search for unspent tx, net %s", a_net->pub.name);
         dap_chain_datum_tx_t *l_tx = dap_chain_net_get_tx_by_hash(a_net, l_tx_cond_hash, TX_SEARCH_TYPE_NET_UNSPENT);
         if(!l_tx) { // If not found - all outs are used. Create new one
             // pass all chains
@@ -169,7 +169,7 @@ static dap_chain_hash_fast_t* dap_chain_net_vpn_client_tx_cond_hash(dap_chain_ne
             l_tx_cond_hash = NULL;
             if(l_tx) {
                 l_tx_cond_ts = (time_t) l_tx->header.ts_created;
-                log_it(L_DEBUG, "2791: got some tx, created %d", l_tx->header.ts_created);
+                log_it(L_DEBUG, "2791: got some tx, created %"DAP_UINT64_FORMAT_U, l_tx->header.ts_created);
             }
         }
     }
@@ -681,7 +681,7 @@ int dap_chain_net_vpn_client_init(dap_config_t * g_config)
     pthread_mutex_init(&sf_socks_mutex, NULL);
 
     // vpn client command
-    dap_chain_node_cli_cmd_item_create ("vpn_client", com_vpn_client, NULL, "VPN client control",
+    dap_chain_node_cli_cmd_item_create ("vpn_client", com_vpn_client, "VPN client control",
     "vpn_client [start -addr <server address> -port <server port>| stop | status] -net <net name>\n"
     "vpn_client init -w <wallet name> -token <token name> -value <value> -net <net name>\n"
             "vpn_client stop -net <net name>\n"

@@ -209,8 +209,8 @@ DAP_STATIC_INLINE void _dap_aligned_free( void *ptr )
 #endif
 #define DAP_FORMAT_HANDLE "p"
 #else
-#define DAP_FORMAT_SOCKET "n"
-#define DAP_FORMAT_HANDLE "n"
+#define DAP_FORMAT_SOCKET "d"
+#define DAP_FORMAT_HANDLE "d"
 #endif
 
 #ifndef LOWORD
@@ -440,13 +440,8 @@ void dap_log_set_max_item(unsigned int a_max);
 char *dap_log_get_item(time_t a_start_time, int a_limit);
 
 #if defined __GNUC__ || defined __clang__
-#ifdef __MINGW_PRINTF_FORMAT
-#define DAP_PRINTF_ATTR(format_index, args_index) \
-    __attribute__ ((format (gnu_printf, format_index, args_index)))
-#else
 #define DAP_PRINTF_ATTR(format_index, args_index) \
     __attribute__ ((format (printf, format_index, args_index)))
-#endif
 #else /* __GNUC__ */
 #define DAP_PRINTF_ATTR(format_index, args_index)
 #endif /* __GNUC__ */
