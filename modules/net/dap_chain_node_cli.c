@@ -1084,8 +1084,8 @@ int dap_chain_node_cli_init(dap_config_t * g_config)
     dap_chain_node_cli_cmd_item_create ("tx_cond_create", com_tx_cond_create, "Make cond transaction",
             "tx_cond_create -net <net name> -token <token_ticker> -wallet_f <wallet_from> -wallet_t <wallet_to>"
                                         "-value <value_datoshi> -unit <mb|kb|b|sec|day> -service <vpn>\n" );
-    dap_chain_node_cli_cmd_item_create ("tx_verify", com_tx_verify, "Verifing transaction",
-            "tx_verify  -wallet <wallet name> \n" );
+    dap_chain_node_cli_cmd_item_create ("tx_verify", com_tx_verify, "Verifing transaction in mempool",
+            "tx_verify -net <net name> -chain <chain name> -tx <tx_hash>\n" );
 
     // Transaction history
     dap_chain_node_cli_cmd_item_create("tx_history", com_tx_history, "Transaction history (for address or by hash)",
@@ -1141,7 +1141,7 @@ int dap_chain_node_cli_init(dap_config_t * g_config)
     if ( l_listen_unix_socket_path && l_listen_unix_socket_permissions ) {
         if ( l_listen_unix_socket_permissions_str ) {
             uint16_t l_perms;
-            dap_sscanf(l_listen_unix_socket_permissions_str,"%hu", &l_perms);
+            dap_sscanf(l_listen_unix_socket_permissions_str,"%ho", &l_perms);
             l_listen_unix_socket_permissions = l_perms;
         }
         log_it( L_INFO, "Console interace on path %s (%04o) ", l_listen_unix_socket_path, l_listen_unix_socket_permissions );
