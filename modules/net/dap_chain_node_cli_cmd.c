@@ -518,15 +518,12 @@ static int link_add_or_del_with_reply(dap_chain_net_t * a_net, dap_chain_node_in
 
 /**
  * @brief node_info_dump_with_reply Handler of command 'node dump'
- *
- * str_reply[out] for reply
- * return 0 Ok, -1 error
  * @param a_net 
  * @param a_addr 
  * @param a_is_full 
  * @param a_alias 
  * @param a_str_reply 
- * @return int 
+ * @return int 0 Ok, -1 error
  */
 static int node_info_dump_with_reply(dap_chain_net_t * a_net, dap_chain_node_addr_t * a_addr, bool a_is_full,
         const char *a_alias, char **a_str_reply)
@@ -3180,10 +3177,10 @@ int com_token_emit(int a_argc, char ** a_argv, char ** a_str_reply)
         return -43;
     }
 
-    // Wallet address that recieves the emission
+    // Token emission
     dap_chain_node_cli_find_option_val(a_argv, arg_index, a_argc, "-emission", &l_emission_hash_str);
 
-    // Wallet address that recieves the emission
+    // Emission certs
     dap_chain_node_cli_find_option_val(a_argv, arg_index, a_argc, "-certs", &l_certs_str);
 
     // Wallet address that recieves the emission
@@ -3192,7 +3189,7 @@ int com_token_emit(int a_argc, char ** a_argv, char ** a_str_reply)
     // Token ticker
     dap_chain_node_cli_find_option_val(a_argv, arg_index, a_argc, "-token", &l_ticker);
 
-    // Token emission
+    // Emission value
     if(dap_chain_node_cli_find_option_val(a_argv, arg_index, a_argc, "-emission_value", &str_tmp)) {
         l_emission_value = strtoull(str_tmp, NULL, 10);
     }
@@ -3296,14 +3293,18 @@ int com_token_emit(int a_argc, char ** a_argv, char ** a_str_reply)
                 sizeof(l_emission->data.type_auth.signs_count);
 
         l_emission = DAP_NEW_Z_SIZE(dap_chain_datum_token_emission_t, l_emission_size);
+        l_emission->hdr.version = 1;
         strncpy(l_emission->hdr.ticker, l_ticker, sizeof(l_emission->hdr.ticker) - 1);
         l_emission->hdr.value = l_emission_value;
         l_emission->hdr.type = DAP_CHAIN_DATUM_TOKEN_EMISSION_TYPE_AUTH;
         memcpy(&l_emission->hdr.address, l_addr, sizeof(l_emission->hdr.address));
+        time_t l_time = time(NULL);
+        memcpy(&l_emission->hdr.nonce, &l_time, sizeof(time_t));
+        l_emission->data.type_auth.signs_count = l_certs_size;
         // Then add signs
         size_t l_offset = 0;
         for(size_t i = 0; i < l_certs_size; i++) {
-            dap_sign_t * l_sign = dap_cert_sign(l_certs[i], &l_emission->hdr,
+            dap_sign_t *l_sign = dap_cert_sign(l_certs[i], &l_emission->hdr,
                     sizeof(l_emission->hdr), 0);
             size_t l_sign_size = dap_sign_get_size(l_sign);
             l_emission_size += l_sign_size;
@@ -3336,15 +3337,15 @@ int com_token_emit(int a_argc, char ** a_argv, char ** a_str_reply)
         if(dap_chain_global_db_gr_set(dap_strdup(l_emission_hash_str_new), (uint8_t *) l_datum_emission, l_datum_emission_size
                 , l_gdb_group_mempool_emission)) {
             if(!dap_strcmp(l_hash_out_type,"hex"))
-                str_reply_tmp = dap_strdup_printf("datum emission %s is placed in datum pool ", l_emission_hash_str_new);
+                str_reply_tmp = dap_strdup_printf("Datum emission %s is placed in datum pool", l_emission_hash_str_new);
             else
-                str_reply_tmp = dap_strdup_printf("datum emission %s is placed in datum pool ", l_emission_hash_str_base58);
+                str_reply_tmp = dap_strdup_printf("Datum emission %s is placed in datum pool", l_emission_hash_str_base58);
         }
         else {
             if(!dap_strcmp(l_hash_out_type,"hex"))
-                dap_chain_node_cli_set_reply_text(a_str_reply, "datum emission %s is not placed in datum pool ", l_emission_hash_str_new);
+                dap_chain_node_cli_set_reply_text(a_str_reply, "Datum emission %s is not placed in datum pool", l_emission_hash_str_new);
             else
-                dap_chain_node_cli_set_reply_text(a_str_reply, "datum emission %s is not placed in datum pool ", l_emission_hash_str_base58);
+                dap_chain_node_cli_set_reply_text(a_str_reply, "Datum emission %s is not placed in datum pool", l_emission_hash_str_base58);
             DAP_DEL_Z(l_emission_hash_str_new);
             l_emission_hash_str = NULL;
             DAP_DEL_Z(l_emission_hash_str_base58);
@@ -3357,6 +3358,7 @@ int com_token_emit(int a_argc, char ** a_argv, char ** a_str_reply)
 
     // create first transaction (with tx_token)
     dap_chain_datum_tx_t *l_tx = DAP_NEW_Z_SIZE(dap_chain_datum_tx_t, sizeof(dap_chain_datum_tx_t));
+    l_tx->header.ts_created = time(NULL);
     dap_chain_hash_fast_t l_tx_prev_hash = { 0 };
     // create items
     dap_chain_tx_token_t *l_tx_token = dap_chain_datum_tx_item_token_create(&l_emission_hash, l_ticker);
@@ -3368,7 +3370,6 @@ int com_token_emit(int a_argc, char ** a_argv, char ** a_str_reply)
     dap_chain_datum_tx_add_item(&l_tx, (const uint8_t*) l_in);
     dap_chain_datum_tx_add_item(&l_tx, (const uint8_t*) l_out);
 
-    // Base tx don't need signature items but let it be
     if (l_certs){
         // Sign all that we have with certs
         for(size_t i = 0; i < l_certs_size; i++) {
@@ -3706,6 +3707,102 @@ int com_mempool_add_ca(int a_argc,  char ** a_argv, char ** a_str_reply)
     }
 }
 
+/**
+ * @brief com_chain_ca_copy
+ * @details copy public CA into the mempool
+ * @param a_argc
+ * @param a_argv
+ * @param a_arg_func
+ * @param a_str_reply
+ * @return
+ */
+int com_chain_ca_copy( int a_argc,  char ** a_argv, char ** a_str_reply)
+{
+    return com_mempool_add_ca(a_argc, a_argv, a_str_reply);
+}
+
+
+/**
+ * @brief com_chain_ca_pub
+ * @details place public CA into the mempool
+ * @param a_argc
+ * @param a_argv
+ * @param a_arg_func
+ * @param a_str_reply
+ * @return
+ */
+int com_chain_ca_pub( int a_argc,  char ** a_argv, char ** a_str_reply)
+{
+    int arg_index = 1;
+    // Read params
+    const char * l_ca_name = NULL;
+    dap_chain_net_t * l_net = NULL;
+    dap_chain_t * l_chain = NULL;
+
+    dap_chain_node_cli_find_option_val(a_argv, arg_index, a_argc, "-ca_name", &l_ca_name);
+    dap_chain_node_cli_cmd_values_parse_net_chain(&arg_index,a_argc, a_argv, a_str_reply, &l_chain, &l_net);
+
+    dap_cert_t * l_cert = dap_cert_find_by_name( l_ca_name );
+    if( l_cert == NULL ){
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Can't find \"%s\" certificate", l_ca_name );
+        return -4;
+    }
+
+
+    if( l_cert->enc_key == NULL ){
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Corrupted certificate \"%s\" without keys certificate", l_ca_name );
+        return -5;
+    }
+
+    // Create empty new cert
+    dap_cert_t * l_cert_new = dap_cert_new(l_ca_name);
+    l_cert_new->enc_key = dap_enc_key_new( l_cert->enc_key->type);
+
+    // Copy only public key
+    l_cert_new->enc_key->pub_key_data = DAP_NEW_Z_SIZE(uint8_t,
+                                                      l_cert_new->enc_key->pub_key_data_size =
+                                                      l_cert->enc_key->pub_key_data_size );
+    memcpy(l_cert_new->enc_key->pub_key_data, l_cert->enc_key->pub_key_data,l_cert->enc_key->pub_key_data_size);
+
+    // Serialize certificate into memory
+    uint32_t l_cert_serialized_size = 0;
+    byte_t * l_cert_serialized = dap_cert_mem_save( l_cert_new, &l_cert_serialized_size );
+    if( l_cert_serialized == NULL){
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Can't serialize in memory certificate" );
+        return -7;
+    }
+    if( l_cert_serialized == NULL){
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Can't serialize in memory certificate");
+        return -7;
+    }
+    // Now all the chechs passed, forming datum for mempool
+    dap_chain_datum_t * l_datum = dap_chain_datum_create( DAP_CHAIN_DATUM_CA, l_cert_serialized , l_cert_serialized_size);
+    DAP_DELETE( l_cert_serialized);
+    if( l_datum == NULL){
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Can't produce datum from certificate");
+        return -7;
+    }
+
+    // Finaly add datum to mempool
+    char *l_hash_str = dap_chain_mempool_datum_add(l_datum,l_chain);
+    if (l_hash_str) {
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Datum %s was successfully placed to mempool", l_hash_str);
+        DAP_DELETE(l_hash_str);
+        return 0;
+    } else {
+        dap_chain_node_cli_set_reply_text(a_str_reply,
+                "Can't place certificate \"%s\" to mempool", l_ca_name);
+        DAP_DELETE( l_datum );
+        return -8;
+    }
+}
+
 
 /**
  * @brief Create transaction
@@ -4016,12 +4113,12 @@ int com_tx_history(int a_argc, char ** a_argv, char **a_str_reply)
 
     char *l_str_ret = NULL;
     if(l_tx_hash_str) {
-        l_str_ret = dap_strdup_printf("history for tx hash %s:\n%s", l_tx_hash_str,
+        l_str_ret = dap_strdup_printf("History for tx hash %s:\n%s", l_tx_hash_str,
                 l_str_out ? l_str_out : " empty");
     }
     else if(l_addr) {
         char *l_addr_str = dap_chain_addr_to_str(l_addr);
-        l_str_ret = dap_strdup_printf("history for addr %s:\n%s", l_addr_str,
+        l_str_ret = dap_strdup_printf("History for addr %s:\n%s", l_addr_str,
                 l_str_out ? l_str_out : " empty");
         DAP_DELETE(l_addr_str);
     }
@@ -4171,54 +4268,35 @@ int cmd_gdb_export(int argc, char ** argv, char ** a_str_reply)
         return -1;
     }
     const char *l_db_path = dap_config_get_item_str(g_config, "resources", "dap_global_db_path");
-
-    // NB! [TEMPFIX] Temporarily backward-compatible until migration to new databases locations (after updates)
-    const char *l_db_driver = dap_config_get_item_str(g_config, "resources", "dap_global_db_driver");
-    char l_db_concat[80];
-    dap_sprintf(l_db_concat, "%s/gdb-%s", l_db_path, l_db_driver);
-
-    struct dirent *d;
-    DIR *dir = opendir(l_db_concat);
+    DIR *dir = opendir(l_db_path);
     if (!dir) {
-        // External "if" to check out old or new path.
-        log_it(L_WARNING, "Probably db directory is in old path. Checking out.");
-        dir = opendir(l_db_path);
-        if (!dir) {
-            log_it(L_ERROR, "Can't open db directory");
-            dap_chain_node_cli_set_reply_text(a_str_reply, "Can't open db directory");
-            return -1;
-        }
+        log_it(L_ERROR, "Can't open db directory");
+        dap_chain_node_cli_set_reply_text(a_str_reply, "Can't open db directory");
+        return -1;
     }
     char l_path[strlen(l_db_path) + strlen(l_filename) + 12];
     memset(l_path, '\0', sizeof(l_path));
     dap_snprintf(l_path, sizeof(l_path), "%s/%s.json", l_db_path, l_filename);
-    /*FILE *l_json_file = fopen(l_path, "a");
-    if (!l_json_file) {
-        log_it(L_ERROR, "Can't open file %s", l_path);
-        dap_chain_node_cli_set_reply_text(a_str_reply, "Can't open specified file");
-        return -1;
-    }*/
+
     struct json_object *l_json = json_object_new_array();
-    for (d = readdir(dir); d; d = readdir(dir)) {
-        if (!dap_strcmp(d->d_name, ".") || !dap_strcmp(d->d_name, "..")) {
-            continue;
-        }
+    dap_list_t *l_groups_list = dap_chain_global_db_driver_get_groups_by_mask("*");
+    for (dap_list_t *l_list = l_groups_list; l_list; l_list = dap_list_next(l_list)) {
         size_t l_data_size = 0;
-        pdap_store_obj_t l_data = dap_chain_global_db_obj_gr_get(NULL, &l_data_size, d->d_name);
-        log_it(L_INFO, "Exporting group %s, number of records: %zu", d->d_name, l_data_size);
+        char *l_group_name = (char *)l_list->data;
+        pdap_store_obj_t l_data = dap_chain_global_db_obj_gr_get(NULL, &l_data_size, l_group_name);
+        log_it(L_INFO, "Exporting group %s, number of records: %zu", l_group_name, l_data_size);
         if (!l_data_size) {
             continue;
         }
 
         struct json_object *l_json_group = json_object_new_array();
         struct json_object *l_json_group_inner = json_object_new_object();
-        json_object_object_add(l_json_group_inner, "group", json_object_new_string(d->d_name));
+        json_object_object_add(l_json_group_inner, "group", json_object_new_string(l_group_name));
 
         for (size_t i = 0; i < l_data_size; ++i) {
             size_t l_out_size = DAP_ENC_BASE64_ENCODE_SIZE((int64_t)l_data[i].value_len) + 1;
             char *l_value_enc_str = DAP_NEW_Z_SIZE(char, l_out_size);
-            //size_t l_enc_size = dap_enc_base64_encode(l_data[i].value, l_data[i].value_len, l_value_enc_str, DAP_ENC_DATA_TYPE_B64);
-
+            dap_enc_base64_encode(l_data[i].value, l_data[i].value_len, l_value_enc_str, DAP_ENC_DATA_TYPE_B64);
             struct json_object *jobj = json_object_new_object();
             json_object_object_add(jobj, "id",      json_object_new_int64((int64_t)l_data[i].id));
             json_object_object_add(jobj, "key",     json_object_new_string(l_data[i].key));
@@ -4233,6 +4311,7 @@ int cmd_gdb_export(int argc, char ** argv, char ** a_str_reply)
         json_object_array_add(l_json, l_json_group_inner);
         dap_store_obj_free(l_data, l_data_size);
     }
+    dap_list_free_full(l_groups_list, free);
     if (json_object_to_file(l_path, l_json) == -1) {
 #if JSON_C_MINOR_VERSION<15
         log_it(L_CRITICAL, "Couldn't export JSON to file, error code %d", errno );
@@ -4307,9 +4386,9 @@ int cmd_gdb_import(int argc, char ** argv, char ** a_str_reply)
             l_group_store[j].timestamp = json_object_get_int64(l_ts);
             l_group_store[j].value_len = (uint64_t)json_object_get_int64(l_value_len);
             l_group_store[j].type   = 'a';
-            //const char *l_value_str = json_object_get_string(l_value);
+            const char *l_value_str = json_object_get_string(l_value);
             char *l_val = DAP_NEW_Z_SIZE(char, l_group_store[j].value_len);
-            //size_t l_dec_size = dap_enc_base64_decode(l_value_str, strlen(l_value_str), l_val, DAP_ENC_DATA_TYPE_B64);
+            dap_enc_base64_decode(l_value_str, strlen(l_value_str), l_val, DAP_ENC_DATA_TYPE_B64);
             l_group_store[j].value  = (uint8_t*)l_val;
         }
         if (dap_chain_global_db_driver_appy(l_group_store, l_records_count)) {

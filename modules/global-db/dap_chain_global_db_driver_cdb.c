@@ -83,12 +83,12 @@ static void cdb_serialize_val_to_dap_store_obj(pdap_store_obj_t a_obj, const cha
     a_obj->key = dap_strdup(key);
     a_obj->id = dap_hex_to_uint(val, sizeof(uint64_t));
     offset += sizeof(uint64_t);
-    a_obj->value_len = dap_hex_to_uint(val + offset, sizeof(unsigned long));
-    offset += sizeof(unsigned long);
+    a_obj->value_len = dap_hex_to_uint(val + offset, sizeof(uint64_t));
+    offset += sizeof(uint64_t);
     a_obj->value = DAP_NEW_SIZE(uint8_t, a_obj->value_len);
     memcpy(a_obj->value, val + offset, a_obj->value_len);
     offset += a_obj->value_len;
-    a_obj->timestamp = (time_t)dap_hex_to_uint(val + offset, sizeof(time_t));
+    a_obj->timestamp = dap_hex_to_uint(val + offset, sizeof(uint64_t));
 }
 
 /** A callback function designed for finding a last item */
@@ -141,7 +141,7 @@ bool dap_cdb_get_cond_obj_iter_callback(void *arg, const char *key, int ksize, c
     return true;
 }
 
-//** A callback function designed for countng items*/
+//** A callback function designed for counting items*/
 bool dap_cdb_get_count_iter_callback(void *arg, const char *key, int ksize, const char *val, int vsize, uint32_t expire, uint64_t oid) {
     UNUSED(ksize);
     UNUSED(val);
@@ -515,7 +515,6 @@ dap_store_obj_t* dap_db_driver_cdb_read_cond_store_obj(const char *a_group, uint
     return l_arg.o;
 }
 
-
 /**
  * @brief Reads count of items in CDB by a_group and a_id.
  * @param a_group the group name
@@ -564,7 +563,6 @@ dap_list_t* dap_db_driver_cdb_get_groups_by_mask(const char *a_group_mask)
     return l_ret_list;
 }
 
-
 /**
  * @brief Adds or deletes item in CDB depending on a_store_obj->type.
  * @param a_store_obj a pointer to the item
@@ -587,22 +585,28 @@ int dap_db_driver_cdb_apply_store_obj(pdap_store_obj_t a_store_obj) {
         if(!a_store_obj->key) {
             return -2;
         }
+        /*if (dap_fnmatch("*.del", a_store_obj->group, 0)) {
+            char *l_del_group = dap_strdup_printf("%s.del", a_store_obj->group);
+            pcdb_instance l_cdb_d = dap_cdb_get_db_by_group(l_del_group);
+            if (l_cdb_d) {
+                l_cdb_i->id = max(l_cdb_d->id, l_cdb_i->id);
+            }
+        }*/
         cdb_record l_rec;
         l_rec.key = a_store_obj->key; //dap_strdup(a_store_obj->key);
         int offset = 0;
-        char *l_val = DAP_NEW_Z_SIZE(char, sizeof(uint64_t) + sizeof(unsigned long) + a_store_obj->value_len + sizeof(time_t));
+        char *l_val = DAP_NEW_Z_SIZE(char, sizeof(uint64_t) + sizeof(uint64_t) + a_store_obj->value_len + sizeof(uint64_t));
         dap_uint_to_hex(l_val, ++l_cdb_i->id, sizeof(uint64_t));
         offset += sizeof(uint64_t);
-        dap_uint_to_hex(l_val + offset, a_store_obj->value_len, sizeof(unsigned long));
-        offset += sizeof(unsigned long);
+        dap_uint_to_hex(l_val + offset, a_store_obj->value_len, sizeof(uint64_t));
+        offset += sizeof(uint64_t);
         if(a_store_obj->value && a_store_obj->value_len){
             memcpy(l_val + offset, a_store_obj->value, a_store_obj->value_len);
             DAP_DELETE(a_store_obj->value);
         }
         offset += a_store_obj->value_len;
-        unsigned long l_time = (unsigned long)a_store_obj->timestamp;
-        dap_uint_to_hex(l_val + offset, l_time, sizeof(time_t));
-        offset += sizeof(time_t);
+        dap_uint_to_hex(l_val + offset, a_store_obj->timestamp, sizeof(uint64_t));
+        offset += sizeof(uint64_t);
         l_rec.val = l_val;
         if (cdb_set2(l_cdb_i->cdb, l_rec.key, (int)strlen(l_rec.key), l_rec.val, offset, CDB_INSERTCACHE | CDB_OVERWRITE, 0) != CDB_SUCCESS) {
             log_it(L_ERROR, "Couldn't add record with key [%s] to CDB: \"%s\"", l_rec.key, cdb_errmsg(cdb_errno(l_cdb_i->cdb)));

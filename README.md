@@ -1,4 +1,4 @@
-# cellframe
+# Cellframe
 
 ![](images/image001.png)
 

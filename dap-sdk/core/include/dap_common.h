@@ -133,8 +133,8 @@ typedef uint8_t byte_t;
   #define DAP_ALFREE(a)         _dap_aligned_free(a, b)
   #define DAP_NEW( a )          DAP_CAST_REINT(a, malloc(sizeof(a)) )
   #define DAP_NEW_SIZE(a, b)    DAP_CAST_REINT(a, malloc(b) )
-  #define DAP_NEW_S( a )          DAP_CAST_REINT(a, alloca(sizeof(a)) )
-  #define DAP_NEW_S_SIZE(a, b)    DAP_CAST_REINT(a, alloca(b) )
+  #define DAP_NEW_S( a )        DAP_CAST_REINT(a, alloca(sizeof(a)) )
+  #define DAP_NEW_S_SIZE(a, b)  DAP_CAST_REINT(a, alloca(b) )
   #define DAP_NEW_Z( a )        DAP_CAST_REINT(a, calloc(1,sizeof(a)))
   #define DAP_NEW_Z_SIZE(a, b)  DAP_CAST_REINT(a, calloc(1,b))
   #define DAP_REALLOC(a, b)     realloc(a,b)
@@ -440,11 +440,17 @@ void dap_log_set_max_item(unsigned int a_max);
 char *dap_log_get_item(time_t a_start_time, int a_limit);
 
 #if defined __GNUC__ || defined __clang__
+#ifdef __MINGW_PRINTF_FORMAT
+#define DAP_PRINTF_ATTR(format_index, args_index) \
+    __attribute__ ((format (gnu_printf, format_index, args_index)))
+#else
 #define DAP_PRINTF_ATTR(format_index, args_index) \
     __attribute__ ((format (printf, format_index, args_index)))
+#endif
 #else /* __GNUC__ */
 #define DAP_PRINTF_ATTR(format_index, args_index)
 #endif /* __GNUC__ */
+
 
 DAP_PRINTF_ATTR(3, 4) void _log_it( const char * log_tag, enum dap_log_level, const char * format, ... );
 #define log_it( _log_level, ...) _log_it( LOG_TAG, _log_level, ##__VA_ARGS__)

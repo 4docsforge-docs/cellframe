@@ -310,18 +310,16 @@ uint8_t * dap_chain_global_db_gr_get(const char *a_key, size_t *a_data_len_out, 
     return l_ret_value;
 }
 
-
 /**
  * @brief Gets an object value from database by a_key for the "local.general" group.
  * @param a_key an object key string
- * @param a_data_out a length of value that were gotten
+ * @param a_data_len_out a length of value that was gotten
  * @return If successful, returns a pointer to the object value, otherwise NULL.
  */
-uint8_t * dap_chain_global_db_get(const char *a_key, size_t *a_data_out)
+uint8_t * dap_chain_global_db_get(const char *a_key, size_t *a_data_len_out)
 {
-    return dap_chain_global_db_gr_get(a_key, a_data_out, GROUP_LOCAL_GENERAL);
+    return dap_chain_global_db_gr_get(a_key, a_data_len_out, GROUP_LOCAL_GENERAL);
 }
-
 
 /**
  * @brief Adds info about the deleted entry to the database.
@@ -332,13 +330,9 @@ uint8_t * dap_chain_global_db_get(const char *a_key, size_t *a_data_out)
  */
 static bool global_db_gr_del_add(char *a_key,const char *a_group, time_t a_timestamp)
 {
-    dap_store_obj_t store_data;
-    memset(&store_data, 0, sizeof(dap_store_obj_t));
+    dap_store_obj_t store_data = {};
     store_data.type = 'a';
     store_data.key = a_key;
-    // no data
-    store_data.value = NULL;
-    store_data.value_len = 0;
     // group = parent group + '.del'
     store_data.group = dap_strdup_printf("%s.del", a_group);
     store_data.timestamp = a_timestamp;
@@ -352,7 +346,6 @@ static bool global_db_gr_del_add(char *a_key,const char *a_group, time_t a_times
         return true;
     return false;
 }
-
 
 /**
  * @brief Deletes info about the deleted object from the database
@@ -380,7 +373,6 @@ static bool global_db_gr_del_del(char *a_key, const char *a_group)
         return true;
     return false;
 }
-
 
 /**
  * @brief Gets time stamp of the deleted object by a_group and a_key arguments.
@@ -421,7 +413,6 @@ bool dap_chain_global_db_del(char *a_key)
 {
     return dap_chain_global_db_gr_del(a_key, GROUP_LOCAL_GENERAL);
 }
-
 
 /**
  * @brief Gets a last item from a database by a_group.
@@ -558,7 +549,6 @@ void dap_global_db_obj_track_history(void* a_store_data)
     }
 }
 
-
 /**
  * @brief Adds a value to a database.
  * @param a_key a object key string
@@ -627,7 +617,7 @@ bool dap_chain_global_db_gr_del(char *a_key,const char *a_group)
     unlock();
     if(l_res >= 0) {
         // add to Del group
-        global_db_gr_del_add(dap_strdup(a_key), store_data.group, store_data.timestamp);
+        global_db_gr_del_add(dap_strdup(a_key), store_data.group, time(NULL));
     }
     // do not add to history if l_res=1 (already deleted)
     if (!l_res) {

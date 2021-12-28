@@ -60,6 +60,7 @@
 #include "dap_chain_net_srv.h"
 #include "dap_chain_net_srv_order.h"
 #include "dap_chain_net_srv_stream_session.h"
+#include "dap_stream_ch_chain_net_srv.h"
 #ifdef DAP_MODULES_DYNAMIC
 #include "dap_modules_dynamic_cdb.h"
 #endif
@@ -90,9 +91,9 @@ static void s_load_all(void);
  * @brief dap_chain_net_srv_init
  * @return
  */
-int dap_chain_net_srv_init(dap_config_t * a_cfg)
-{
-    UNUSED(a_cfg);
+int dap_chain_net_srv_init()
+{    
+    dap_stream_ch_chain_net_srv_init();
     m_uid = NULL;
     m_uid_count = 0;
     if( dap_chain_net_srv_order_init() != 0 )
@@ -535,11 +536,16 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
         }
 #ifdef DAP_MODULES_DYNAMIC
         else if( dap_strcmp( l_order_str, "recheck" ) == 0 ){
-            //int dap_chain_net_srv_vpn_cdb_server_list_check_orders(dap_chain_net_t *a_net);
             int (*dap_chain_net_srv_vpn_cdb_server_list_check_orders)(dap_chain_net_t *a_net);
             dap_chain_net_srv_vpn_cdb_server_list_check_orders = dap_modules_dynamic_get_cdb_func("dap_chain_net_srv_vpn_cdb_server_list_check_orders");
             int l_init_res = dap_chain_net_srv_vpn_cdb_server_list_check_orders ? dap_chain_net_srv_vpn_cdb_server_list_check_orders(l_net) : -5;
-            ret = (l_init_res > 0) ? 0 : -10;
+            if (l_init_res >= 0) {
+                dap_string_append_printf(l_string_ret, "Orders recheck started\n");
+                ret = 0;
+            } else {
+                dap_string_append_printf(l_string_ret, "Orders recheck not started, code %d\n", l_init_res);
+                ret = -10;
+            }
 
         }else if( dap_strcmp( l_order_str, "static" ) == 0 ){
             // find the subcommand directly after the 'order' command

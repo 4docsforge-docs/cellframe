@@ -198,8 +198,7 @@ dap_store_obj_t* dap_store_obj_copy(dap_store_obj_t *a_store_obj, size_t a_store
         memcpy(l_store_obj_dst, l_store_obj_src, sizeof(dap_store_obj_t));
         l_store_obj_dst->group = dap_strdup(l_store_obj_src->group);
         l_store_obj_dst->key = dap_strdup(l_store_obj_src->key);
-        l_store_obj_dst->value = DAP_NEW_SIZE(uint8_t, l_store_obj_dst->value_len);
-        memcpy(l_store_obj_dst->value, l_store_obj_src->value, l_store_obj_dst->value_len);
+        l_store_obj_dst->value = DAP_DUP_SIZE(l_store_obj_src->value, l_store_obj_src->value_len);
     }
     return l_store_obj;
 }
@@ -281,7 +280,6 @@ static int wait_data(pthread_mutex_t *a_mutex, pthread_cond_t *a_cond, int l_tim
 }
 
 #ifdef USE_WRITE_BUFFER
-/
 /**
  * @brief Checks if a buffer is not empty.
  * @return Returns true if the buffer is not empty, false if it is empty.
@@ -450,17 +448,19 @@ int dap_chain_global_db_driver_appy(pdap_store_obj_t a_store_obj, size_t a_store
         for(size_t i = 0; i < a_store_count; i++) {
             dap_store_obj_t *l_store_obj_cur = a_store_obj + i;
             assert(l_store_obj_cur);
+            char *l_cur_key = dap_strdup(l_store_obj_cur->key);
             int l_ret_tmp = s_drv_callback.apply_store_obj(l_store_obj_cur);
             if(l_ret_tmp == 1) {
-                log_it(L_INFO, "item is missing (may be already deleted) %s/%s\n", l_store_obj_cur->group, l_store_obj_cur->key);
+                log_it(L_INFO, "Item is missing (may be already deleted) %s/%s\n", l_store_obj_cur->group, l_cur_key);
                 l_ret = 1;
-                break;
             }
             if(l_ret_tmp < 0) {
-                log_it(L_ERROR, "Can't write item %s/%s (code %d)\n", l_store_obj_cur->group, l_store_obj_cur->key, l_ret_tmp);
+                log_it(L_ERROR, "Can't write item %s/%s (code %d)\n", l_store_obj_cur->group, l_cur_key, l_ret_tmp);
                 l_ret -= 1;
-                break;
             }
+            DAP_DELETE(l_cur_key);
+            if (l_ret)
+                break;
         }
 
     if(a_store_count > 1 && s_drv_callback.transaction_end)
@@ -518,7 +518,7 @@ size_t dap_chain_global_db_driver_count(const char *a_group, uint64_t id)
  * @param a_group_mask the group mask string
  * @return If successful, returns the list of group names, otherwise NULL.
  */
-dap_list_t* dap_chain_global_db_driver_get_groups_by_mask(const char *a_group_mask)
+dap_list_t *dap_chain_global_db_driver_get_groups_by_mask(const char *a_group_mask)
 {
     dap_list_t *l_list = NULL;
     if(s_drv_callback.get_groups_by_mask)
