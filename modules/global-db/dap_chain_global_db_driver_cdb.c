@@ -172,10 +172,11 @@ pcdb_instance dap_cdb_init_group(char *a_group, int a_flags) {
     pthread_mutex_lock(&cdb_mutex);
     char l_cdb_path[strlen(s_cdb_path) + strlen(a_group) + 2];
     HASH_FIND_STR(s_cdb, a_group, l_cdb_i);
-    if (l_cdb_i && !(a_flags & CDB_TRUNC)) {
-        goto FIN;
+    if (!(a_flags & CDB_TRUNC)) {
+        if (l_cdb_i)
+            goto FIN;
+        l_cdb_i = DAP_NEW(cdb_instance);
     }
-    l_cdb_i = DAP_NEW(cdb_instance);
     l_cdb_i->local_group = dap_strdup(a_group);
     l_cdb_i->cdb = cdb_new();
     memset(l_cdb_path, '\0', sizeof(l_cdb_path));
@@ -585,13 +586,6 @@ int dap_db_driver_cdb_apply_store_obj(pdap_store_obj_t a_store_obj) {
         if(!a_store_obj->key) {
             return -2;
         }
-        /*if (dap_fnmatch("*.del", a_store_obj->group, 0)) {
-            char *l_del_group = dap_strdup_printf("%s.del", a_store_obj->group);
-            pcdb_instance l_cdb_d = dap_cdb_get_db_by_group(l_del_group);
-            if (l_cdb_d) {
-                l_cdb_i->id = max(l_cdb_d->id, l_cdb_i->id);
-            }
-        }*/
         cdb_record l_rec;
         l_rec.key = a_store_obj->key; //dap_strdup(a_store_obj->key);
         int offset = 0;
@@ -618,13 +612,13 @@ int dap_db_driver_cdb_apply_store_obj(pdap_store_obj_t a_store_obj) {
         if(a_store_obj->key) {
             if(cdb_del(l_cdb_i->cdb, a_store_obj->key, (int) strlen(a_store_obj->key)) == -3)
                 ret = 1;
+            DAP_DELETE(a_store_obj->key);
         } else {
             cdb_destroy(l_cdb_i->cdb);
             if (!dap_cdb_init_group(a_store_obj->group, CDB_TRUNC | CDB_PAGEWARMUP)) {
                 ret = -1;
             }
         }
-        DAP_DELETE(a_store_obj->key);
     }
     return ret;
 }
