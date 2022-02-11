@@ -186,6 +186,7 @@ typedef struct dap_chain_net_pvt{
     // General rwlock for structure
     pthread_rwlock_t rwlock;
 
+    dap_list_t *notify_callbacks;
 } dap_chain_net_pvt_t;
 
 typedef struct dap_chain_net_item{
@@ -263,9 +264,6 @@ static bool s_seed_mode = false;
 
 static uint8_t *dap_chain_net_set_acl(dap_chain_hash_fast_t *a_pkey_hash);
 uint8_t *dap_chain_net_set_acl_param(dap_chain_hash_fast_t *a_pkey_hash);
-
-
-static dap_global_db_obj_callback_notify_t s_srv_callback_notify = NULL;
 
 /**
  * @brief
@@ -390,9 +388,9 @@ dap_chain_net_state_t dap_chain_net_get_target_state(dap_chain_net_t *a_net)
  * 
  * @param a_callback dap_global_db_obj_callback_notify_t callback function
  */
-void dap_chain_net_set_srv_callback_notify(dap_global_db_obj_callback_notify_t a_callback)
+void dap_chain_net_add_notify_callback(dap_chain_net_t *a_net, dap_global_db_obj_callback_notify_t a_callback)
 {
-    s_srv_callback_notify = a_callback;
+   PVT(a_net)->notify_callbacks = dap_list_append(PVT(a_net)->notify_callbacks, a_callback);
 }
 
 /**
@@ -460,16 +458,17 @@ void dap_chain_net_sync_gdb_broadcast(void *a_arg, const char a_op_code, const c
  * @param a_value buffer with data
  * @param a_value_len buffer size
  */
-static void s_gbd_history_callback_notify (void * a_arg, const char a_op_code, const char * a_group,
-                                                     const char * a_key, const void * a_value, const size_t a_value_len)
+static void s_gbd_history_callback_notify(void *a_arg, const char a_op_code, const char *a_group,
+                                          const char *a_key, const void *a_value, const size_t a_value_len)
 {
     if (!a_arg) {
         return;
     }
-    dap_chain_node_mempool_autoproc_notify(a_arg, a_op_code, a_group, a_key, a_value, a_value_len);
-    dap_chain_net_sync_gdb_broadcast(a_arg, a_op_code, a_group, a_key, a_value, a_value_len);
-    if (s_srv_callback_notify) {
-        s_srv_callback_notify(a_arg, a_op_code, a_group, a_key, a_value, a_value_len);
+    dap_chain_net_t *l_net = (dap_chain_net_t *)a_arg;
+    for (dap_list_t *it = PVT(l_net)->notify_callbacks; it; it = PVT(l_net)->notify_callbacks->next) {
+        dap_global_db_obj_callback_notify_t l_callback = (dap_global_db_obj_callback_notify_t)it->data;
+        if (l_callback)
+            l_callback(a_arg, a_op_code, a_group, a_key, a_value, a_value_len);
     }
 }
 
@@ -727,9 +726,11 @@ static void s_node_link_callback_disconnected(dap_chain_node_client_t *a_node_cl
             log_it(L_ERROR, "Links count is zero in disconnected callback, looks smbd decreased it twice or forget to increase on connect/reconnect");
     }
     if (l_net_pvt->state_target != NET_STATE_OFFLINE) {
+        a_node_client->keep_connection = true;
         for (dap_list_t *it = l_net_pvt->net_links; it; it = it->next) {
             if (((struct net_link *)it->data)->link == NULL) {  // We have a free prepared link
                 s_node_link_remove(l_net_pvt, a_node_client);
+                a_node_client->keep_connection = false;
                 ((struct net_link *)it->data)->link = dap_chain_net_client_create_n_connect(l_net,
                                                         ((struct net_link *)it->data)->link_info);
                 pthread_rwlock_unlock(&l_net_pvt->rwlock);
@@ -737,9 +738,7 @@ static void s_node_link_callback_disconnected(dap_chain_node_client_t *a_node_cl
             }
         }
         dap_chain_node_info_t *l_link_node_info = s_get_dns_link_from_cfg(l_net);
-        if (!l_link_node_info) {    // Try to keep this connection
-            a_node_client->keep_connection = true;
-        } else {
+        if (l_link_node_info) {
             struct link_dns_request *l_dns_request = DAP_NEW_Z(struct link_dns_request);
             l_dns_request->net = l_net;
             if (dap_chain_node_info_dns_request(l_link_node_info->hdr.ext_addr_v4,
@@ -752,7 +751,6 @@ static void s_node_link_callback_disconnected(dap_chain_node_client_t *a_node_cl
                 log_it(L_ERROR, "Can't process node info dns request");
                 DAP_DELETE(l_link_node_info);
                 DAP_DELETE(l_dns_request);
-                a_node_client->keep_connection = true;
             } else {
                 s_node_link_remove(l_net_pvt, a_node_client);
                 a_node_client->keep_connection = false;
@@ -825,6 +823,12 @@ static void s_node_link_callback_delete(dap_chain_node_client_t * a_node_client,
                                 "}\n", a_node_client->net->pub.id.uint64, a_node_client->info->hdr.cell_id.uint64,
                                     NODE_ADDR_FP_ARGS_S(a_node_client->info->hdr.address));
         return;
+    } else if (a_node_client->is_connected){
+        a_node_client->is_connected = false;
+        if (l_net_pvt->links_connected_count)
+            l_net_pvt->links_connected_count--;
+        else
+            log_it(L_ERROR, "Links count is zero in delete callback");
     }
     dap_chain_net_sync_unlock(l_net, a_node_client);
     pthread_rwlock_wrlock(&l_net_pvt->rwlock);
@@ -832,10 +836,6 @@ static void s_node_link_callback_delete(dap_chain_node_client_t * a_node_client,
         if (((struct net_link *)it->data)->link == a_node_client) {
             log_it(L_DEBUG,"Replace node client with new one");
             ((struct net_link *)it->data)->link = dap_chain_net_client_create_n_connect(l_net, a_node_client->info);
-            if (l_net_pvt->links_connected_count)
-                l_net_pvt->links_connected_count--;
-            else
-                log_it(L_ERROR, "Links count is zero in delete callback");
         }
     }
     pthread_rwlock_unlock(&l_net_pvt->rwlock);
@@ -1037,7 +1037,7 @@ static bool s_net_states_proc(dap_proc_thread_t *a_thread, void *a_arg)
                     l_link->keep_connection = false;
                     dap_chain_node_client_close(l_link);
                 }
-                DAP_DELETE(((struct net_link *)l_tmp->data)->link_info);
+                DAP_DEL_Z(((struct net_link *)l_tmp->data)->link_info);
                 DAP_DELETE(l_tmp);
                 l_tmp = l_next;
             }
@@ -1154,7 +1154,6 @@ static bool s_net_states_proc(dap_proc_thread_t *a_thread, void *a_arg)
             for (dap_list_t *l_tmp = l_net_pvt->net_links; l_tmp; l_tmp = dap_list_next(l_tmp)) {
                 dap_chain_node_info_t *l_link_info = ((struct net_link *)l_tmp->data)->link_info;
                 dap_chain_node_client_t *l_client = dap_chain_net_client_create_n_connect(l_net, l_link_info);
-                l_client->keep_connection = true;
                 ((struct net_link *)l_tmp->data)->link = l_client;
                 if (++l_used_links == s_required_links_count)
                     break;
@@ -1250,7 +1249,14 @@ bool dap_chain_net_sync_unlock(dap_chain_net_t *a_net, dap_chain_node_client_t *
  */
 struct dap_chain_node_client * dap_chain_net_client_create_n_connect( dap_chain_net_t * a_net,struct dap_chain_node_info* a_link_info)
 {
-    return dap_chain_node_client_create_n_connect(a_net, a_link_info,"CN",(dap_chain_node_client_callbacks_t *)&s_node_link_callbacks,a_net);
+    dap_chain_node_client_t *l_ret = dap_chain_node_client_create_n_connect(a_net,
+                                                                            a_link_info,
+                                                                            "CN",
+                                                                            (dap_chain_node_client_callbacks_t *)&s_node_link_callbacks,
+                                                                            a_net);
+    if (l_ret)
+        l_ret->keep_connection = true;
+    return l_ret;
 }
 
 /**
@@ -1530,60 +1536,43 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
         if ( !dap_strcmp(l_sync_mode_str,"all") )
             dap_chain_net_get_flag_sync_from_zero(l_net);
 
-        if ( l_stats_str ){
+        if ( l_stats_str ){          
+
+            char l_from_str_new[50], l_to_str_new[50];
+            const char c_time_fmt[]="%Y-%m-%d_%H:%M:%S";
+            struct tm l_from_tm = {}, l_to_tm = {};
+
             if ( strcmp(l_stats_str,"tx") == 0 ) {
                 const char *l_to_str = NULL;
-                struct tm l_to_tm = {0};
-
                 const char *l_from_str = NULL;
-                struct tm l_from_tm = {0};
-
                 const char *l_prev_sec_str = NULL;
-                //time_t l_prev_sec_ts;
-
-                const char c_time_fmt[]="%Y-%m-%d_%H:%M:%S";
 
                 // Read from/to time
                 dap_chain_node_cli_find_option_val(argv, arg_index, argc, "-from", &l_from_str);
                 dap_chain_node_cli_find_option_val(argv, arg_index, argc, "-to", &l_to_str);
                 dap_chain_node_cli_find_option_val(argv, arg_index, argc, "-prev_sec", &l_prev_sec_str);
 
-                if (l_from_str ) {
+                time_t l_ts_now = time(NULL);
+                if (l_from_str) {
                     strptime( (char *)l_from_str, c_time_fmt, &l_from_tm );
-                }
-
-                if (l_to_str) {
-                    strptime( (char *)l_to_str, c_time_fmt, &l_to_tm );
-                }
-
-                if ( l_to_str == NULL ){ // If not set '-to' - we set up current time
-                    time_t l_ts_now = time(NULL);
-                    localtime_r(&l_ts_now, &l_to_tm);
-                }
-
-                if ( l_prev_sec_str ){
-                    time_t l_ts_now = time(NULL);
+                    if (l_to_str) {
+                        strptime( (char *)l_to_str, c_time_fmt, &l_to_tm );
+                    } else { // If not set '-to' - we set up current time
+                        localtime_r(&l_ts_now, &l_to_tm);
+                    }
+                } else if (l_prev_sec_str) {
                     l_ts_now -= strtol( l_prev_sec_str, NULL,10 );
                     localtime_r(&l_ts_now, &l_from_tm );
-                }/*else if ( l_from_str == NULL ){ // If not set '-from' we set up current time minus 10 seconds
-                    time_t l_ts_now = time(NULL);
-                    l_ts_now -= 10;
+                } else if ( l_from_str == NULL ) { // If not set '-from' we set up current time minus 60 seconds
+                    l_ts_now -= 60;
                     localtime_r(&l_ts_now, &l_from_tm );
-                }*/
-
-                // Form timestamps from/to
+                }
                 time_t l_from_ts = mktime(&l_from_tm);
                 time_t l_to_ts = mktime(&l_to_tm);
 
-                // Produce strings
-                char l_from_str_new[50];
-                char l_to_str_new[50];
+                dap_string_t * l_ret_str = dap_string_new("Transactions statistics:\n");
                 strftime(l_from_str_new, sizeof(l_from_str_new), c_time_fmt,&l_from_tm );
                 strftime(l_to_str_new, sizeof(l_to_str_new), c_time_fmt,&l_to_tm );
-
-
-                dap_string_t * l_ret_str = dap_string_new("Transactions statistics:\n");
-
                 dap_string_append_printf( l_ret_str, "\tFrom: %s\tTo: %s\n", l_from_str_new, l_to_str_new);
                 log_it(L_INFO, "Calc TPS from %s to %s", l_from_str_new, l_to_str_new);
                 uint64_t l_tx_count = dap_chain_ledger_count_from_to ( l_net->pub.ledger, l_from_ts, l_to_ts);
@@ -1593,6 +1582,27 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
                 dap_string_append_printf( l_ret_str, "\tTotal:  %"DAP_UINT64_FORMAT_U"\n", l_tx_count );
                 dap_chain_node_cli_set_reply_text( a_str_reply, l_ret_str->str );
                 dap_string_free( l_ret_str, false );
+            } else if (strcmp(l_stats_str, "tps") == 0) {
+                struct timespec l_from_time_acc = {}, l_to_time_acc = {};
+                dap_string_t * l_ret_str = dap_string_new("Transactions per second peak values:\n");
+                size_t l_tx_num = dap_chain_ledger_count_tps(l_net->pub.ledger, &l_from_time_acc, &l_to_time_acc);
+                if (l_tx_num) {
+                    localtime_r(&l_from_time_acc.tv_sec, &l_from_tm);
+                    strftime(l_from_str_new, sizeof(l_from_str_new), c_time_fmt, &l_from_tm);
+                    localtime_r(&l_to_time_acc.tv_sec, &l_to_tm);
+                    strftime(l_to_str_new, sizeof(l_to_str_new), c_time_fmt, &l_to_tm);
+                    dap_string_append_printf(l_ret_str, "\tFrom: %s\tTo: %s\n", l_from_str_new, l_to_str_new);
+                    uint64_t l_diff_ns = (l_to_time_acc.tv_sec - l_from_time_acc.tv_sec) * 1000000000 +
+                                            l_to_time_acc.tv_nsec - l_from_time_acc.tv_nsec;
+                    long double l_tps = (long double)(l_tx_num * 1000000000) / (long double)(l_diff_ns);
+                    dap_string_append_printf(l_ret_str, "\tSpeed:  %.3Lf TPS\n", l_tps);
+                }
+                dap_string_append_printf(l_ret_str, "\tTotal:  %zu\n", l_tx_num);
+                dap_chain_node_cli_set_reply_text(a_str_reply, l_ret_str->str);
+                dap_string_free(l_ret_str, false);
+            } else {
+                dap_chain_node_cli_set_reply_text(a_str_reply,
+                                                  "Subcommand 'stats' requires one of parameter: tx, tps\n");
             }
         } else if ( l_go_str){
             if ( strcmp(l_go_str,"online") == 0 ) {
@@ -1606,14 +1616,16 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
                                                   c_net_states[NET_STATE_OFFLINE]);
                 dap_chain_net_state_go_to(l_net, NET_STATE_OFFLINE);
 
-            }
-            else if(strcmp(l_go_str, "sync") == 0) {
+            } else if(strcmp(l_go_str, "sync") == 0) {
                 dap_chain_node_cli_set_reply_text(a_str_reply, "Network \"%s\" resynchronizing",
                                                   l_net->pub.name);
                 if (PVT(l_net)->state_target == NET_STATE_ONLINE)
                     dap_chain_net_state_go_to(l_net, NET_STATE_ONLINE);
                 else
                     dap_chain_net_state_go_to(l_net, NET_STATE_SYNC_CHAINS);
+            } else {
+                dap_chain_node_cli_set_reply_text(a_str_reply,
+                                                  "Subcommand 'go' requires one of parameter: online, offline, sync\n");
             }
 
         } else if ( l_get_str){
@@ -1671,7 +1683,7 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
                 dap_chain_node_cli_set_reply_text(a_str_reply,"Stopped network\n");
             }else {
                 dap_chain_node_cli_set_reply_text(a_str_reply,
-                                                  "Subcommand \"link\" requires one of parameter: list\n");
+                                                  "Subcommand 'link' requires one of parameter: list\n");
                 ret = -3;
             }
 
@@ -1697,7 +1709,7 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
 
             } else {
                 dap_chain_node_cli_set_reply_text(a_str_reply,
-                                                  "Subcommand \"sync\" requires one of parameter: all,gdb,chains\n");
+                                                  "Subcommand 'sync' requires one of parameter: all, gdb, chains\n");
                 ret = -2;
             }
         } else if (l_ca_str) {
@@ -1800,7 +1812,7 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
                 return 0;
             } else {
                 dap_chain_node_cli_set_reply_text(a_str_reply,
-                                                  "Subcommand \"ca\" requires one of parameter: add, list, del\n");
+                                                  "Subcommand 'ca' requires one of parameter: add, list, del\n");
                 ret = -5;
             }
         } else if (l_ledger_str && !strcmp(l_ledger_str, "reload")) {
@@ -1816,16 +1828,21 @@ static int s_cli_net(int argc, char **argv, char **a_str_reply)
                     dap_chain_load_all(l_chain);
                 }
             }
-            DL_FOREACH(l_net->pub.chains, l_chain) {
-                if (l_chain->callback_atom_add_from_treshold) {
-                    while (l_chain->callback_atom_add_from_treshold(l_chain, NULL)) {
-                        log_it(L_DEBUG, "Added atom from treshold");
+            bool l_processed;
+            do {
+                l_processed = false;
+                DL_FOREACH(l_net->pub.chains, l_chain) {
+                    if (l_chain->callback_atom_add_from_treshold) {
+                        while (l_chain->callback_atom_add_from_treshold(l_chain, NULL)) {
+                            log_it(L_DEBUG, "Added atom from treshold");
+                            l_processed = true;
+                        }
                     }
                 }
-            }
+            } while (l_processed);
         } else {
             dap_chain_node_cli_set_reply_text(a_str_reply,
-                                              "Command requires one of subcomand: sync, link, go, get, stats, ca, ledger");
+                                              "Command 'net' requires one of subcomand: sync, link, go, get, stats, ca, ledger");
             ret = -1;
         }
 
@@ -1935,7 +1952,7 @@ int s_net_load(const char * a_net_name, uint16_t a_acl_idx)
         if (l_gdb_sync_groups && l_gdb_sync_groups_count > 0) {
             for(uint16_t i = 0; i < l_gdb_sync_groups_count; i++) {
                 // add group to special sync
-                dap_chain_global_db_add_sync_extra_group(l_gdb_sync_groups[i], s_gbd_history_callback_notify, l_net);
+                dap_chain_global_db_add_sync_extra_group(l_gdb_sync_groups[i], dap_chain_net_sync_gdb_broadcast, l_net);
             }
         }
 
@@ -2366,7 +2383,7 @@ int s_net_load(const char * a_net_name, uint16_t a_acl_idx)
         }
         l_net_pvt->load_mode = false;
         dap_chain_ledger_load_end(l_net->pub.ledger);
-
+        dap_chain_net_add_notify_callback(l_net, dap_chain_net_sync_gdb_broadcast);
         if (l_target_state != l_net_pvt->state_target)
             dap_chain_net_state_go_to(l_net, l_target_state);
 
@@ -2544,10 +2561,6 @@ void dap_chain_net_set_state ( dap_chain_net_t * l_net, dap_chain_net_state_t a_
     assert(l_net);
     log_it(L_DEBUG,"%s set state %s", l_net->pub.name, dap_chain_net_state_to_str(a_state)  );
     pthread_rwlock_wrlock(&PVT(l_net)->rwlock);
-    if( a_state == PVT(l_net)->state){
-        pthread_rwlock_unlock(&PVT(l_net)->rwlock);
-        return;
-    }
     PVT(l_net)->state = a_state;
     pthread_rwlock_unlock(&PVT(l_net)->rwlock);
     dap_proc_queue_add_callback(dap_events_worker_get_auto(), s_net_states_proc,l_net );

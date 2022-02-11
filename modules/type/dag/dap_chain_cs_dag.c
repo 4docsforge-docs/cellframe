@@ -165,6 +165,16 @@ void dap_chain_cs_dag_deinit(void)
 
 }
 
+/**
+ * @brief callback during round verification, calling from dap_global_db_obj_track_history (l_sync_group_item->callback_notify)
+ * 
+ * @param a_arg callabck function arguments (dap_chain_cs_dag_t)
+ * @param a_op_code opcode letter (f.e. "a","d")
+ * @param a_group group name, f.e. "home21-network-poa-0000000000000000-round.new"
+ * @param a_key key in hex format, f.e. "0x9AE0BDCE677D3B7CBE836B2C1E76F63B9130F5A7E1C941B61A5221859C0ADA31"
+ * @param a_value 
+ * @param a_value_size size of value
+ */
 static void s_history_callback_round_notify(void * a_arg, const char a_op_code, const char * a_group,
         const char * a_key, const void * a_value, const size_t a_value_size)
 {
@@ -253,18 +263,13 @@ int dap_chain_cs_dag_new(dap_chain_t * a_chain, dap_config_t * a_chain_cfg)
     l_dag->datum_add_hashes_count = dap_config_get_item_uint16_default(a_chain_cfg,"dag","datum_add_hashes_count",1);
     l_dag->use_event_round_cfg = false;
     l_dag->callback_cs_set_event_round_cfg = s_dag_chain_cs_set_event_round_cfg;
-    // l_dag->gdb_group_events_round_new = dap_strdup( dap_config_get_item_str_default(a_chain_cfg,"dag","gdb_group_events_round_new",
-    //                                                                     "events.round.new"));
-
     char * l_round_new_str = dap_strdup( dap_config_get_item_str_default(a_chain_cfg,"dag","gdb_group_events_round_new", "new"));
     dap_chain_net_t *l_net = dap_chain_net_by_id(a_chain->net_id);
     if(!l_dag->is_celled){
-        //char * gdb_group = dap_strdup_printf( "%016llx-%016llx-round", l_net->pub.id.uint64, a_chain->id.uint64);
         char * gdb_group = dap_strdup_printf( "%s-%s-round", l_net->pub.name, a_chain->name);
         l_dag->gdb_group_events_round_new = dap_strdup_printf( "%s.%s", gdb_group, l_round_new_str);
         dap_chain_global_db_add_sync_group(gdb_group, s_history_callback_round_notify, l_dag);
-    }else {
-        //char * gdb_group = dap_strdup_printf( "%016llx-%016llx-%016llx-round", l_net->pub.id.uint64, a_chain->id.uint64, l_net->pub.cell_id.uint64);
+    } else {
         char * gdb_group = dap_strdup_printf( "%s-%s-%016llx-round", l_net->pub.name, a_chain->name, l_net->pub.cell_id.uint64);
         l_dag->gdb_group_events_round_new = dap_strdup_printf( "%s.%s", gdb_group, l_round_new_str);
         dap_chain_global_db_add_sync_group(gdb_group, s_history_callback_round_notify, l_dag);
@@ -313,6 +318,10 @@ static void s_dap_chain_cs_dag_purge(dap_chain_t *a_chain)
         DAP_DELETE(l_event_current);
     }
     pthread_rwlock_unlock(&l_dag_pvt->events_rwlock);
+    dap_chain_cell_t *l_cell_cur, *l_cell_tmp;
+    HASH_ITER(hh, a_chain->cells, l_cell_cur, l_cell_tmp) {
+        dap_chain_cell_close(l_cell_cur);
+    }
 }
 
 /**
@@ -457,7 +466,7 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
     switch (ret) {
     case ATOM_MOVE_TO_THRESHOLD:
         pthread_rwlock_wrlock(l_events_rwlock);
-        HASH_ADD(hh, PVT(l_dag)->events_treshold, hash,sizeof (l_event_item->hash), l_event_item);
+        HASH_ADD(hh, PVT(l_dag)->events_treshold, hash, sizeof(l_event_item->hash), l_event_item);
         pthread_rwlock_unlock(l_events_rwlock);
         if(s_debug_more)
             log_it(L_DEBUG, "... added to threshold");
@@ -467,7 +476,7 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
         switch (l_consensus_check) {
         case 0:
             pthread_rwlock_wrlock(l_events_rwlock);
-            HASH_ADD(hh, PVT(l_dag)->events,hash,sizeof (l_event_item->hash), l_event_item);
+            HASH_ADD(hh, PVT(l_dag)->events,hash, sizeof(l_event_item->hash), l_event_item);
             s_dag_events_lasts_process_new_last_event(l_dag, l_event_item);
             pthread_rwlock_unlock(l_events_rwlock);
             if(s_debug_more)
@@ -639,23 +648,28 @@ static size_t s_chain_callback_datums_pool_proc(dap_chain_t * a_chain, dap_chain
                         // add all atoms from treshold
                         dap_chain_net_t *l_net = dap_chain_net_by_id(a_chain->net_id);
                         dap_chain_t *l_cur_chain;
-                        DL_FOREACH(l_net->pub.chains, l_cur_chain) {
-                            if (l_cur_chain->callback_atom_add_from_treshold) {
-                                dap_chain_atom_ptr_t l_atom_treshold;
-                                do {
-                                    size_t l_atom_treshold_size;
-                                    // add in ledger
-                                    l_atom_treshold = l_cur_chain->callback_atom_add_from_treshold(l_cur_chain, &l_atom_treshold_size);
-                                    // add into file
-                                    if (l_atom_treshold) {
-                                        int l_res = dap_chain_atom_save(l_cur_chain, l_atom_treshold, l_atom_treshold_size, l_cur_chain->cells->id);
-                                        if (l_res < 0) {
-                                            log_it(L_ERROR, "Can't save event %p from treshold", l_atom_treshold);
+                        bool l_processed;
+                        do {
+                            l_processed = false;
+                            DL_FOREACH(l_net->pub.chains, l_cur_chain) {
+                                if (l_cur_chain->callback_atom_add_from_treshold) {
+                                    dap_chain_atom_ptr_t l_atom_treshold;
+                                    do {
+                                        size_t l_atom_treshold_size;
+                                        // add in ledger
+                                        l_atom_treshold = l_cur_chain->callback_atom_add_from_treshold(l_cur_chain, &l_atom_treshold_size);
+                                        // add into file
+                                        if (l_atom_treshold) {
+                                            l_processed = true;
+                                            int l_res = dap_chain_atom_save(l_cur_chain, l_atom_treshold, l_atom_treshold_size, l_cur_chain->cells->id);
+                                            if (l_res < 0) {
+                                                log_it(L_ERROR, "Can't save event %p from treshold", l_atom_treshold);
+                                            }
                                         }
-                                    }
-                                } while (l_atom_treshold);
+                                    } while (l_atom_treshold);
+                                }
                             }
-                        }
+                        } while (l_processed);
                         l_datum_processed++;
                     }
                     else {
@@ -935,10 +949,10 @@ int dap_chain_cs_dag_event_verify_hashes_with_treshold(dap_chain_cs_dag_t * a_da
     if (ret == DAP_THRESHOLD_CONFLICTING)
         return ret;
     return l_is_events_all_hashes ?
-                l_is_events_main_hashes ?
+                (l_is_events_main_hashes ?
                     DAP_THRESHOLD_OK :
-                DAP_THRESHOLD_NO_HASHES :
-            DAP_THRESHOLD_NO_HASHES_IN_MAIN;
+                DAP_THRESHOLD_NO_HASHES_IN_MAIN) :
+            DAP_THRESHOLD_NO_HASHES;
 }
 
 /**
@@ -949,39 +963,36 @@ int dap_chain_cs_dag_event_verify_hashes_with_treshold(dap_chain_cs_dag_t * a_da
 dap_chain_cs_dag_event_item_t* dap_chain_cs_dag_proc_treshold(dap_chain_cs_dag_t * a_dag, dap_ledger_t * a_ledger)
 {
     bool res = false;
-    // TODO Process finish treshold. For now - easiest from possible
     dap_chain_cs_dag_event_item_t * l_event_item = NULL, * l_event_item_tmp = NULL;
     pthread_rwlock_wrlock(&PVT(a_dag)->events_rwlock);
     // !!!
     int l_count = HASH_COUNT(PVT(a_dag)->events_treshold);
     log_it(L_DEBUG, "*** %d events in threshold", l_count);
-    HASH_ITER(hh,PVT(a_dag)->events_treshold,l_event_item, l_event_item_tmp){
-        dap_dag_threshold_verification_res_t ret = dap_chain_cs_dag_event_verify_hashes_with_treshold (a_dag, l_event_item->event);
-        if ( ret == DAP_THRESHOLD_OK || ret == DAP_THRESHOLD_CONFLICTING ){ // All its hashes are in main table, move thats one too into it
-            HASH_DEL(PVT(a_dag)->events_treshold,l_event_item);
-            if(ret == DAP_THRESHOLD_OK){
-                if(s_debug_more) {
-                    char * l_event_hash_str = dap_chain_hash_fast_to_str_new(&l_event_item->hash);
-                    log_it(L_DEBUG, "Processing event (threshold): %s...", l_event_hash_str);
-                    DAP_DELETE(l_event_hash_str);
-                }
-                int l_add_res = s_dap_chain_add_atom_to_events_table(a_dag, a_ledger, l_event_item);
-                if (!l_add_res) {
-                    HASH_ADD(hh, PVT(a_dag)->events,hash,sizeof (l_event_item->hash), l_event_item);
-                    s_dag_events_lasts_process_new_last_event(a_dag, l_event_item);
-                    if(s_debug_more)
-                        log_it(L_INFO, "... moved from treshold to main chains");
-                    res = true;
-                    break;
-                }else{
-                    if(s_debug_more)
-                        log_it(L_WARNING, "... error adding");
-                    DAP_DELETE(l_event_item);
-                }
-                //res = true;
-            }else if(ret == DAP_THRESHOLD_CONFLICTING)
-                HASH_ADD(hh, PVT(a_dag)->events_treshold_conflicted, hash,sizeof (l_event_item->hash),  l_event_item);
-
+    HASH_ITER(hh, PVT(a_dag)->events_treshold, l_event_item, l_event_item_tmp) {
+        dap_dag_threshold_verification_res_t ret = dap_chain_cs_dag_event_verify_hashes_with_treshold(a_dag, l_event_item->event);
+        if (ret == DAP_THRESHOLD_OK) {
+            if (s_debug_more) {
+                char * l_event_hash_str = dap_chain_hash_fast_to_str_new(&l_event_item->hash);
+                log_it(L_DEBUG, "Processing event (threshold): %s...", l_event_hash_str);
+                DAP_DELETE(l_event_hash_str);
+            }
+            int l_add_res = s_dap_chain_add_atom_to_events_table(a_dag, a_ledger, l_event_item);
+            if (!l_add_res) {
+                HASH_DEL(PVT(a_dag)->events_treshold, l_event_item);
+                HASH_ADD(hh, PVT(a_dag)->events, hash, sizeof(l_event_item->hash), l_event_item);
+                s_dag_events_lasts_process_new_last_event(a_dag, l_event_item);
+                if(s_debug_more)
+                    log_it(L_INFO, "... moved from treshold to main chains");
+                res = true;
+                break;
+            } else {
+                if(s_debug_more)
+                    log_it(L_WARNING, "... error adding");
+            }
+            //res = true;
+        } else if (ret == DAP_THRESHOLD_CONFLICTING) {
+            HASH_DEL(PVT(a_dag)->events_treshold, l_event_item);
+            HASH_ADD(hh, PVT(a_dag)->events_treshold_conflicted, hash, sizeof (l_event_item->hash), l_event_item);
         }
     }
     pthread_rwlock_unlock(&PVT(a_dag)->events_rwlock);
