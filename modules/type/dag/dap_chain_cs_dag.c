@@ -353,35 +353,35 @@ static int s_dap_chain_add_atom_to_ledger(dap_chain_cs_dag_t * a_dag, dap_ledger
             dap_chain_datum_token_t *l_token = (dap_chain_datum_token_t*) l_datum->data;
             return dap_chain_ledger_token_load(a_ledger, l_token, l_datum->header.data_size);
         }
-        break;
-        case DAP_CHAIN_DATUM_TOKEN_EMISSION: {
+        case DAP_CHAIN_DATUM_TOKEN_EMISSION:
             return dap_chain_ledger_token_emission_load(a_ledger, l_datum->data, l_datum->header.data_size);
-        }
-        break;
         case DAP_CHAIN_DATUM_TX: {
-            dap_chain_datum_tx_t *l_tx = (dap_chain_datum_tx_t*) l_datum->data;
-            // don't save bad transactions to base
-            int l_ret = dap_chain_ledger_tx_load(a_ledger, l_tx);
-            if( l_ret != 1 ) {
-                return l_ret;
-            }
-            dap_chain_cs_dag_event_item_t * l_tx_event = DAP_NEW_Z(dap_chain_cs_dag_event_item_t);
-            l_tx_event->ts_added = a_event_item->ts_added;
-            l_tx_event->event = a_event_item->event;
-            l_tx_event->event_size = a_event_item->event_size;
-            dap_hash_fast(l_tx, dap_chain_datum_tx_get_size(l_tx), &l_tx_event->hash);
+            dap_chain_datum_tx_t *l_tx = (dap_chain_datum_tx_t *)l_datum->data;
+            dap_hash_fast_t l_tx_hash;
+            int l_ret = dap_chain_ledger_tx_load(a_ledger, l_tx, &l_tx_hash);
+            //TODO process return codes & different datums
+            unsigned l_hash_item_hashv;
+            HASH_VALUE(&l_tx_hash, sizeof(l_tx_hash), l_hash_item_hashv);
+            dap_chain_cs_dag_event_item_t *l_tx_event;
             int l_err = pthread_rwlock_wrlock(l_events_rwlock);
-            HASH_ADD(hh, PVT(a_dag)->tx_events, hash, sizeof(l_tx_event->hash), l_tx_event);
-            if (l_err != EDEADLK) {
-                pthread_rwlock_unlock(l_events_rwlock);
+            HASH_FIND_BYHASHVALUE(hh, PVT(a_dag)->tx_events, &l_tx_hash, sizeof(l_tx_event->hash),
+                                  l_hash_item_hashv, l_tx_event);
+            if (!l_tx_event) {
+                l_tx_event = DAP_NEW_Z(dap_chain_cs_dag_event_item_t);
+                l_tx_event->ts_added = a_event_item->ts_added;
+                l_tx_event->event = a_event_item->event;
+                l_tx_event->event_size = a_event_item->event_size;
+                memcpy(&l_tx_event->hash, &l_tx_hash, sizeof(l_tx_hash));
+                HASH_ADD_BYHASHVALUE(hh, PVT(a_dag)->tx_events, hash, sizeof(l_tx_event->hash),
+                                     l_hash_item_hashv, l_tx_event);
             }
+            if (l_err != EDEADLK)
+                pthread_rwlock_unlock(l_events_rwlock);
+            return l_ret == 1 ? 0 : l_ret;
         }
-        break;
-        case DAP_CHAIN_DATUM_CA: {
+        case DAP_CHAIN_DATUM_CA:
             dap_cert_chain_file_save(l_datum, a_dag->chain->net_name);
             return DAP_CHAIN_DATUM_CA;
-        }
-        break;
         default:
             return -1;
     }
@@ -473,36 +473,28 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
         break;
     case ATOM_ACCEPT: {
         int l_consensus_check = s_dap_chain_add_atom_to_events_table(l_dag, a_chain->ledger, l_event_item);
+        pthread_rwlock_wrlock(l_events_rwlock);
+        HASH_ADD(hh, PVT(l_dag)->events,hash, sizeof(l_event_item->hash), l_event_item);
+        s_dag_events_lasts_process_new_last_event(l_dag, l_event_item);
+        pthread_rwlock_unlock(l_events_rwlock);
         switch (l_consensus_check) {
         case 0:
-            pthread_rwlock_wrlock(l_events_rwlock);
-            HASH_ADD(hh, PVT(l_dag)->events,hash, sizeof(l_event_item->hash), l_event_item);
-            s_dag_events_lasts_process_new_last_event(l_dag, l_event_item);
-            pthread_rwlock_unlock(l_events_rwlock);
             if(s_debug_more)
                 log_it(L_DEBUG, "... added");
             break;
         case DAP_CHAIN_CS_VERIFY_CODE_TX_NO_PREVIOUS:
         case DAP_CHAIN_CS_VERIFY_CODE_TX_NO_EMISSION:
         case DAP_CHAIN_CS_VERIFY_CODE_TX_NO_TOKEN:
-            pthread_rwlock_wrlock(l_events_rwlock);
-            HASH_ADD(hh, PVT(l_dag)->events_treshold, hash, sizeof(l_event_item->hash), l_event_item);
-            pthread_rwlock_unlock(l_events_rwlock);
             if(s_debug_more)
-                log_it(L_DEBUG, "... tresholded");
-            ret = ATOM_MOVE_TO_THRESHOLD;
+                log_it(L_DEBUG, "... ledger tresholded");
             break;
         case DAP_CHAIN_DATUM_CA:
-            ret = ATOM_ACCEPT;
             if(s_debug_more)
                 log_it(L_DEBUG, "... DATUM_CA");
             break;
         default:
-            if (s_debug_more) {
-                l_event_hash_str = dap_chain_hash_fast_to_str_new(&l_event_item->hash);
-                log_it(L_WARNING, "Atom %s (size %zd) error adding (code %d)", l_event_hash_str, a_atom_size, l_consensus_check);
-            }
-            ret = ATOM_REJECT;
+            if (s_debug_more)
+                log_it(L_WARNING, "... added with ledger code %d", l_consensus_check);
             break;
         }
     }
@@ -977,19 +969,17 @@ dap_chain_cs_dag_event_item_t* dap_chain_cs_dag_proc_treshold(dap_chain_cs_dag_t
                 DAP_DELETE(l_event_hash_str);
             }
             int l_add_res = s_dap_chain_add_atom_to_events_table(a_dag, a_ledger, l_event_item);
-            if (!l_add_res) {
-                HASH_DEL(PVT(a_dag)->events_treshold, l_event_item);
-                HASH_ADD(hh, PVT(a_dag)->events, hash, sizeof(l_event_item->hash), l_event_item);
-                s_dag_events_lasts_process_new_last_event(a_dag, l_event_item);
-                if(s_debug_more)
+            HASH_DEL(PVT(a_dag)->events_treshold, l_event_item);
+            HASH_ADD(hh, PVT(a_dag)->events, hash, sizeof(l_event_item->hash), l_event_item);
+            s_dag_events_lasts_process_new_last_event(a_dag, l_event_item);
+            res = true;
+            if(s_debug_more) {
+                if (!l_add_res)
                     log_it(L_INFO, "... moved from treshold to main chains");
-                res = true;
-                break;
-            } else {
-                if(s_debug_more)
-                    log_it(L_WARNING, "... error adding");
+                else
+                    log_it(L_WARNING, "... moved with ledger code %d", l_add_res);
             }
-            //res = true;
+            break;
         } else if (ret == DAP_THRESHOLD_CONFLICTING) {
             HASH_DEL(PVT(a_dag)->events_treshold, l_event_item);
             HASH_ADD(hh, PVT(a_dag)->events_treshold_conflicted, hash, sizeof (l_event_item->hash), l_event_item);
@@ -1764,9 +1754,6 @@ static int s_cli_dag(int argc, char ** argv, char **a_str_reply)
                 }else if (l_from_events_str && (strcmp(l_from_events_str,"events") == 0) ){
                     dap_string_t * l_str_tmp = dap_string_new(NULL);
                     pthread_rwlock_rdlock(&PVT(l_dag)->events_rwlock);
-                    size_t l_events_count = HASH_COUNT(PVT(l_dag)->events);
-                    dap_string_append_printf(l_str_tmp,"%s.%s: Have %zu events :\n",
-                                             l_net->pub.name,l_chain->name,l_events_count);
                     dap_chain_cs_dag_event_item_t * l_event_item = NULL,*l_event_item_tmp = NULL;
                     HASH_ITER(hh,PVT(l_dag)->events,l_event_item, l_event_item_tmp ) {
                         char buf[50];
@@ -1776,7 +1763,10 @@ static int s_cli_dag(int argc, char ** argv, char **a_str_reply)
                                                  l_event_item_hash_str, dap_ctime_r( &l_ts_create,buf ) );
                         DAP_DELETE(l_event_item_hash_str);
                     }
+                    size_t l_events_count = HASH_COUNT(PVT(l_dag)->events);
                     pthread_rwlock_unlock(&PVT(l_dag)->events_rwlock);
+                    dap_string_append_printf(l_str_tmp,"%s.%s have total %zu events\n",
+                                             l_net->pub.name,l_chain->name,l_events_count);
                     dap_chain_node_cli_set_reply_text(a_str_reply, l_str_tmp->str);
                     dap_string_free(l_str_tmp,false);
 

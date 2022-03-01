@@ -94,7 +94,10 @@ size_t dap_chain_net_srv_order_get_size(dap_chain_net_srv_order_t *a_order)
     size_t l_sign_size = 0;
     if (a_order->version > 1) {
         dap_sign_t *l_sign = (dap_sign_t *)&a_order->ext[a_order->ext_size];
-        l_sign_size = dap_sign_get_size(l_sign);
+        if (l_sign->header.type.type == SIG_TYPE_NULL)
+            l_sign_size = sizeof(dap_sign_type_t);
+        else
+            l_sign_size = dap_sign_get_size(l_sign);
     }
     return sizeof(dap_chain_net_srv_order_t) + a_order->ext_size + l_sign_size;
 }
@@ -303,6 +306,10 @@ dap_chain_net_srv_order_t * dap_chain_net_srv_order_compose(
         l_order = DAP_REALLOC(l_order, sizeof(dap_chain_net_srv_order_t) + l_order->ext_size + l_sign_size);
         memcpy(&l_order->ext[l_order->ext_size], l_sign, l_sign_size);
         DAP_DELETE(l_sign);
+    } else {
+        dap_sign_type_t l_type = { .type = SIG_TYPE_NULL };
+        l_order = DAP_REALLOC(l_order, sizeof(dap_chain_net_srv_order_t) + l_order->ext_size + sizeof(dap_sign_type_t));
+        memcpy(&l_order->ext[l_order->ext_size], &l_type, sizeof(dap_sign_type_t));
     }
     return l_order;
 }
@@ -323,7 +330,7 @@ char *dap_chain_net_srv_order_save(dap_chain_net_t *a_net, dap_chain_net_srv_ord
     dap_hash_fast( a_order, l_order_size, &l_order_hash );
     char * l_order_hash_str = dap_chain_hash_fast_to_str_new(&l_order_hash);
     char * l_gdb_group_str = dap_chain_net_srv_order_get_gdb_group( a_net);
-    if (!dap_chain_global_db_gr_set(dap_strdup(l_order_hash_str), DAP_DUP(a_order), l_order_size, l_gdb_group_str)) {
+    if (!dap_chain_global_db_gr_set(dap_strdup(l_order_hash_str), DAP_DUP_SIZE(a_order, l_order_size), l_order_size, l_gdb_group_str)) {
         DAP_DELETE( l_gdb_group_str );
         return NULL;
     }
@@ -387,9 +394,19 @@ lb_order_pass:
         l_orders_size = 0;
         for (size_t i=0; i< l_orders_count; i++){
             dap_chain_net_srv_order_t * l_order = (dap_chain_net_srv_order_t *) l_orders[i].value;
-            if (l_order->version > 2 || l_order->direction > SERV_DIR_SELL ||
-                    dap_chain_net_srv_order_get_size(l_order) != l_orders[i].value_len) {
-                continue; // order is corrupted
+            if (l_order_pass_first) {
+                if (l_order->version > 2 || l_order->direction > SERV_DIR_SELL ||
+                        dap_chain_net_srv_order_get_size(l_order) != l_orders[i].value_len) {
+                    dap_chain_global_db_gr_del(dap_strdup(l_orders[i].key), l_gdb_group_str);
+                    continue; // order is corrupted
+                }
+                dap_chain_hash_fast_t l_hash, l_hash_gdb;
+                dap_hash_fast(l_order, dap_chain_net_srv_order_get_size(l_order), &l_hash);
+                dap_chain_hash_fast_from_str(l_orders[i].key, &l_hash_gdb);
+                if (memcmp(&l_hash, &l_hash_gdb, sizeof(dap_chain_hash_fast_t))) {
+                    dap_chain_global_db_gr_del(dap_strdup(l_orders[i].key), l_gdb_group_str);
+                    continue; // order is corrupted
+                }
             }
             // Check direction
             if (a_direction != SERV_DIR_UNDEFINED )
@@ -544,8 +561,8 @@ static void s_srv_order_callback_notify(void *a_arg, const char a_op_code, const
     }
     dap_chain_net_t *l_net = (dap_chain_net_t *)a_arg;
     char *l_gdb_group_str = dap_chain_net_srv_order_get_gdb_group(l_net);
-    if (!strcmp(a_group, l_gdb_group_str)) {
-        for (dap_list_t *it = s_order_notify_callbacks; it; it = s_order_notify_callbacks->next) {
+    if (!dap_strcmp(a_group, l_gdb_group_str)) {
+        for (dap_list_t *it = s_order_notify_callbacks; it; it = it->next) {
             struct dap_order_notify *l_notifier = (struct dap_order_notify *)it->data;
             if ((l_notifier->net == NULL || l_notifier->net == l_net) &&
                         l_notifier->callback) {
