@@ -75,7 +75,7 @@ int dap_chain_datum_tx_add_item(dap_chain_datum_tx_t **a_tx, const uint8_t *a_it
     if(!size)
         return -1;
     dap_chain_datum_tx_t *tx_cur = *a_tx;
-    tx_cur = (dap_chain_datum_tx_t*) realloc(tx_cur, dap_chain_datum_tx_get_size(tx_cur) + size);
+    tx_cur = (dap_chain_datum_tx_t *)DAP_REALLOC(tx_cur, dap_chain_datum_tx_get_size(tx_cur) + size);
     memcpy((uint8_t*) tx_cur->tx_items + tx_cur->header.tx_items_size, a_item, size);
     tx_cur->header.tx_items_size += size;
     *a_tx = tx_cur;
@@ -104,14 +104,14 @@ int dap_chain_datum_tx_add_in_item(dap_chain_datum_tx_t **a_tx, dap_chain_hash_f
  *
  * return summary value from inserted items
  */
-uint64_t dap_chain_datum_tx_add_in_item_list(dap_chain_datum_tx_t **a_tx, dap_list_t *a_list_used_out)
+uint256_t dap_chain_datum_tx_add_in_item_list(dap_chain_datum_tx_t **a_tx, dap_list_t *a_list_used_out)
 {
     dap_list_t *l_list_tmp = a_list_used_out;
-    uint64_t l_value_to_items = 0; // how many datoshi to transfer
+    uint256_t l_value_to_items = {}; // how many datoshi to transfer
     while (l_list_tmp) {
-        list_used_item_t *item = l_list_tmp->data;
-        if (dap_chain_datum_tx_add_in_item(a_tx, &item->tx_hash_fast, item->num_idx_out) == 1) {
-            l_value_to_items += item->value;
+        list_used_item_t *l_item = l_list_tmp->data;
+        if (dap_chain_datum_tx_add_in_item(a_tx, &l_item->tx_hash_fast, l_item->num_idx_out) == 1) {
+            SUM_256_256(l_value_to_items, l_item->value, &l_value_to_items);
         }
         l_list_tmp = dap_list_next(l_list_tmp);
     }
@@ -142,12 +142,23 @@ int dap_chain_datum_tx_add_in_cond_item(dap_chain_datum_tx_t **a_tx, dap_chain_h
 
 }
 
+int dap_chain_datum_tx_add_fee_item(dap_chain_datum_tx_t **a_tx, uint256_t a_value)
+{
+    dap_chain_tx_out_cond_t *l_tx_out_fee = dap_chain_datum_tx_item_out_cond_create_fee(a_value);
+    if (l_tx_out_fee) {
+        dap_chain_datum_tx_add_item(a_tx, (const uint8_t *)l_tx_out_fee);
+        DAP_DELETE(l_tx_out_fee);
+        return 1;
+    }
+    return -1;
+}
+
 /**
  * Create 'out' item and insert to transaction
  *
  * return 1 Ok, -1 Error
  */
-int dap_chain_datum_tx_add_out_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr, uint64_t a_value)
+int dap_chain_datum_tx_add_out_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr, uint256_t a_value)
 {
     dap_chain_tx_out_t *l_tx_out = dap_chain_datum_tx_item_out_create(a_addr, a_value);
     if(l_tx_out) {
@@ -163,7 +174,7 @@ int dap_chain_datum_tx_add_out_item(dap_chain_datum_tx_t **a_tx, const dap_chain
  *
  * return 1 Ok, -1 Error
  */
-int dap_chain_datum_tx_add_out_ext_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr, uint64_t a_value, const char *a_token)
+int dap_chain_datum_tx_add_out_ext_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr, uint256_t a_value, const char *a_token)
 {
     dap_chain_tx_out_ext_t *l_tx_out = dap_chain_datum_tx_item_out_ext_create(a_addr, a_value, a_token);
     if(l_tx_out) {
@@ -179,8 +190,8 @@ int dap_chain_datum_tx_add_out_ext_item(dap_chain_datum_tx_t **a_tx, const dap_c
  *
  * return 1 Ok, -1 Error
  */
-int dap_chain_datum_tx_add_out_cond_item(dap_chain_datum_tx_t **a_tx, dap_enc_key_t *a_key, dap_chain_net_srv_uid_t a_srv_uid,
-        uint64_t a_value, uint64_t a_value_max_per_unit, dap_chain_net_srv_price_unit_uid_t a_unit, const void *a_cond, size_t a_cond_size)
+int dap_chain_datum_tx_add_out_cond_item(dap_chain_datum_tx_t **a_tx, dap_pkey_t *a_key, dap_chain_net_srv_uid_t a_srv_uid,
+        uint256_t a_value, uint256_t a_value_max_per_unit, dap_chain_net_srv_price_unit_uid_t a_unit, const void *a_cond, size_t a_cond_size)
 {
     dap_chain_tx_out_cond_t *l_tx_out = dap_chain_datum_tx_item_out_cond_create_srv_pay(
                 a_key, a_srv_uid,a_value, a_value_max_per_unit, a_unit, a_cond, a_cond_size );
@@ -191,6 +202,7 @@ int dap_chain_datum_tx_add_out_cond_item(dap_chain_datum_tx_t **a_tx, dap_enc_ke
     }
     return -1;
 }
+
 
 /**
  * Sign a transaction (Add sign item to transaction)

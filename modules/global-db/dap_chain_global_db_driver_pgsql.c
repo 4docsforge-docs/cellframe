@@ -31,12 +31,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "dap_chain_global_db_driver_pgsql.h"
 #include "dap_common.h"
 #include "dap_hash.h"
 #include "dap_file_utils.h"
 #include "dap_strfuncs.h"
 #include "dap_file_utils.h"
-#include "dap_chain_global_db_driver_pgsql.h"
 
 #ifdef DAP_CHAIN_GDB_ENGINE_PGSQL
 #include <pwd.h>
@@ -77,6 +77,7 @@ static void s_pgsql_free_connection(PGconn *a_conn)
     for (int i = 0; i < DAP_PGSQL_POOL_COUNT; i++) {
         if (s_conn_pool[i].conn == a_conn) {
             s_conn_pool[i].busy = 0;
+			break;
         }
     }
     pthread_rwlock_unlock(&s_db_rwlock);
@@ -303,8 +304,6 @@ int dap_db_driver_pgsql_apply_store_obj(dap_store_obj_t *a_store_obj)
 
         // execute add request
         l_res = PQexecParams(l_conn, l_query_str, 2, NULL, l_param_vals, l_param_lens, l_param_formats, 0);
-        DAP_DELETE(a_store_obj->value);
-        DAP_DELETE(a_store_obj->key);
         if (PQresultStatus(l_res) != PGRES_COMMAND_OK) {
             if (s_trans_conn) { //we shouldn't fail within a transaacion
                 dap_db_driver_pgsql_end_transaction();
@@ -328,7 +327,6 @@ int dap_db_driver_pgsql_apply_store_obj(dap_store_obj_t *a_store_obj)
         // remove all group
         else
             l_query_str = dap_strdup_printf("DROP TABLE \"%s\"", a_store_obj->group);
-        DAP_DELETE(a_store_obj->key);
         // execute delete request
         l_res = PQexec(l_conn, l_query_str);
         if (PQresultStatus(l_res) != PGRES_COMMAND_OK) {

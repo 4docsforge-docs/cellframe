@@ -25,6 +25,7 @@ if (CELLFRAME_MODULES MATCHES "network")
     # Stream channels
     add_subdirectory(channel/chain)
     add_subdirectory(channel/chain-net)
+    add_subdirectory(channel/chain-voting)
 endif()
 
 # Mining
@@ -65,6 +66,11 @@ endif()
 # Block PoS
 if (CELLFRAME_MODULES MATCHES "cs-block-pos")
     add_subdirectory(consensus/block-pos)
+endif()
+
+# Block TON
+if (CELLFRAME_MODULES MATCHES "cs-block-ton")
+    add_subdirectory(consensus/block-ton)
 endif()
 
 # Block PoW

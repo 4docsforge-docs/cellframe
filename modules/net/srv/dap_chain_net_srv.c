@@ -303,7 +303,7 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
                     if(l_ext) {
                         l_order->ext_size = strlen(l_ext) + 1;
                         l_order = DAP_REALLOC(l_order, sizeof(dap_chain_net_srv_order_t) + l_order->ext_size);
-                        strncpy((char *)l_order->ext, l_ext, l_order->ext_size);
+                        strncpy((char *)l_order->ext_n_sign, l_ext, l_order->ext_size);
                     }
                     else
                         dap_chain_net_srv_order_set_continent_region(&l_order, l_continent_num, l_region_str);
@@ -318,7 +318,7 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
                         if(dap_strcmp(l_new_order_hash_str, l_order_hash_hex_str))
                             dap_chain_net_srv_order_delete_by_hash_str(l_net, l_order_hash_hex_str);
                         DAP_DELETE(l_new_order_hash_str);
-                        dap_string_append_printf(l_string_ret, "Order updated\n");
+                        dap_string_append_printf(l_string_ret, "order updated\n");
                     } else
                         dap_string_append_printf(l_string_ret, "Order did not updated\n");
                     DAP_DELETE(l_order);
@@ -355,7 +355,8 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
 
             dap_chain_net_srv_order_direction_t l_direction = SERV_DIR_UNDEFINED;
             dap_chain_net_srv_uid_t l_srv_uid={{0}};
-            uint64_t l_price_min=0, l_price_max =0 ;
+            uint256_t l_price_min = {};
+            uint256_t l_price_max = {};
             dap_chain_net_srv_price_unit_uid_t l_price_unit={{0}};
 
             if ( l_direction_str ){
@@ -369,10 +370,10 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
                 l_srv_uid.uint64 = (uint64_t) atoll( l_srv_uid_str);
 
             if ( l_price_min_str )
-                l_price_min = (uint64_t) atoll ( l_price_min_str );
+                l_price_min = dap_chain_balance_scan(l_price_min_str);
 
             if ( l_price_max_str )
-                l_price_max = (uint64_t) atoll ( l_price_max_str );
+                l_price_max = dap_chain_balance_scan(l_price_max_str);
             if ( l_price_unit_str)
                 l_price_unit.uint32 = (uint32_t) atol ( l_price_unit_str );
 
@@ -413,7 +414,8 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
                 dap_chain_net_srv_order_t * l_orders = NULL;
                 size_t l_orders_num =0;
                 dap_chain_net_srv_uid_t l_srv_uid={{0}};
-                uint64_t l_price_min=0, l_price_max =0 ;
+                uint256_t l_price_min = {};
+                uint256_t l_price_max = {};
                 dap_chain_net_srv_price_unit_uid_t l_price_unit={{0}};
                 dap_chain_net_srv_order_direction_t l_direction = SERV_DIR_UNDEFINED;
 
@@ -465,7 +467,7 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
                 dap_chain_node_addr_t l_node_addr={0};
                 dap_chain_hash_fast_t l_tx_cond_hash={{0}};
                 dap_chain_time_t l_expires=0; // TS when the service expires
-                uint64_t l_price=0;
+                uint256_t l_price = {};
                 char l_price_token[DAP_CHAIN_TICKER_SIZE_MAX]={0};
                 dap_chain_net_srv_price_unit_uid_t l_price_unit={{0}};
                 dap_chain_net_srv_order_direction_t l_direction = SERV_DIR_UNDEFINED;
@@ -493,7 +495,7 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
                 }
                 if (l_tx_cond_hash_str)
                     dap_chain_hash_fast_from_str (l_tx_cond_hash_str, &l_tx_cond_hash);
-                l_price = (uint64_t) atoll ( l_price_str );
+                l_price = dap_chain_balance_scan(l_price_str);
                 l_price_unit.uint32 = (uint32_t) atol ( l_price_unit_str );
                 strncpy(l_price_token, l_price_token_str, DAP_CHAIN_TICKER_SIZE_MAX - 1);
                 size_t l_ext_len = l_ext? strlen(l_ext) + 1 : 0;
@@ -593,6 +595,110 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
     return ret;
 }
 
+bool dap_chain_net_srv_pay_verificator(dap_chain_tx_out_cond_t *a_cond, dap_chain_datum_tx_t *a_tx, bool a_owner)
+{
+    if (!a_owner)
+        return false;
+    dap_chain_datum_tx_receipt_t *l_receipt = (dap_chain_datum_tx_receipt_t *)
+                                               dap_chain_datum_tx_item_get(a_tx, NULL, TX_ITEM_TYPE_RECEIPT, NULL);
+    if (!l_receipt)
+        return false;
+    dap_sign_t *l_sign = dap_chain_datum_tx_receipt_sign_get(l_receipt, l_receipt->size, 1);
+    if (!l_sign)
+        return false;
+    dap_hash_fast_t l_pkey_hash;
+    if (!dap_sign_get_pkey_hash(l_sign, &l_pkey_hash))
+        return false;
+    return dap_hash_fast_compare(&l_pkey_hash, &a_cond->subtype.srv_pay.pkey_hash);
+    // TODO add comparision a_tx sign pkey with receipt provider sign pkey
+}
+
+int dap_chain_net_srv_parse_pricelist(dap_chain_net_srv_t *a_srv, const char *a_config_section)
+{
+    int ret = 0;
+    if (!a_config_section)
+        return ret;
+    a_srv->grace_period = dap_config_get_item_uint32_default(g_config, a_config_section, "grace_period", 60);
+    //! IMPORTANT ! This fetch is single-action and cannot be further reused, since it modifies the stored config data
+    uint16_t l_pricelist_count = 0;
+    char **l_pricelist = dap_config_get_array_str(g_config, a_config_section, "pricelist", &l_pricelist_count);
+    for (uint16_t i = 0; i < l_pricelist_count; i++) {
+        dap_chain_net_srv_price_t *l_price = DAP_NEW_Z(dap_chain_net_srv_price_t);
+        short l_iter = 0;
+        char *l_ctx;
+        for (char *l_price_token = strtok_r(l_pricelist[i], ":", &l_ctx); l_price_token || l_iter == 6; l_price_token = strtok_r(NULL, ":", &l_ctx), ++l_iter) {
+            //log_it(L_DEBUG, "Tokenizer: %s", l_price_token);
+            switch (l_iter) {
+            case 0:
+                l_price->net_name = l_price_token;
+                if (!(l_price->net = dap_chain_net_by_name(l_price->net_name))) {
+                    log_it(L_ERROR, "Error parsing pricelist: can't find network \"%s\"", l_price_token);
+                    break;
+                }
+                continue;
+            case 1:
+                l_price->value_datoshi = dap_chain_coins_to_balance(l_price_token);
+                if (IS_ZERO_256(l_price->value_datoshi)) {
+                    log_it(L_ERROR, "Error parsing pricelist: text on 2nd position \"%s\" is not floating number", l_price_token);
+                    l_iter = 0;
+                    break;
+                }
+                continue;
+            case 2:
+                dap_stpcpy(l_price->token, l_price_token);
+                continue;
+            case 3:
+                l_price->units = strtoul(l_price_token, NULL, 10);
+                if (!l_price->units) {
+                    log_it(L_ERROR, "Error parsing pricelist: text on 4th position \"%s\" is not unsigned integer", l_price_token);
+                    l_iter = 0;
+                    break;
+                }
+                continue;
+            case 4:
+                if (!strcmp(l_price_token,      "SEC"))
+                    l_price->units_uid.enm = SERV_UNIT_SEC;
+                else if (!strcmp(l_price_token, "DAY"))
+                    l_price->units_uid.enm = SERV_UNIT_DAY;
+                else if (!strcmp(l_price_token, "MB"))
+                    l_price->units_uid.enm = SERV_UNIT_MB;
+                else if (!strcmp(l_price_token, "KB"))
+                    l_price->units_uid.enm = SERV_UNIT_KB;
+                else if (!strcmp(l_price_token, "B"))
+                    l_price->units_uid.enm = SERV_UNIT_B;
+                else if (!strcmp(l_price_token, "PCS"))
+                    l_price->units_uid.enm = SERV_UNIT_PCS;
+                else {
+                    log_it(L_ERROR, "Error parsing pricelist: wrong unit type \"%s\"", l_price_token);
+                    l_iter = 0;
+                    break;
+                }
+                continue;
+            case 5:
+                if (!(l_price->wallet = dap_chain_wallet_open(l_price_token, dap_config_get_item_str_default(g_config, "resources", "wallets_path", NULL)))) {
+                    log_it(L_ERROR, "Error parsing pricelist: can't open wallet \"%s\"", l_price_token);
+                    l_iter = 0;
+                    break;
+                }
+                continue;
+            case 6:
+                log_it(L_INFO, "Price item correct, added to service");
+                ret++;
+                break;
+            default:
+                break;
+            }
+            log_it(L_DEBUG, "Done with price item %d", i);
+            if (l_iter == 6)
+                DL_APPEND(a_srv->pricelist, l_price);
+            else
+                DAP_DELETE(l_price);
+            break; // double break exits tokenizer loop and steps to next price item
+        }
+    }
+    return ret;
+}
+
 /**
  * @brief dap_chain_net_srv_add
  * @param a_uid
@@ -601,10 +707,14 @@ static int s_cli_net_srv( int argc, char **argv, char **a_str_reply)
  * @param a_callback_response_error
  * @return
  */
-dap_chain_net_srv_t* dap_chain_net_srv_add(dap_chain_net_srv_uid_t a_uid,dap_chain_net_srv_callback_data_t a_callback_request,
+dap_chain_net_srv_t* dap_chain_net_srv_add(dap_chain_net_srv_uid_t a_uid,
+                                           const char *a_config_section,
+                                           dap_chain_net_srv_callback_data_t a_callback_request,
                                            dap_chain_net_srv_callback_data_t a_callback_response_success,
                                            dap_chain_net_srv_callback_data_t a_callback_response_error,
-                                           dap_chain_net_srv_callback_data_t a_callback_receipt_next_success)
+                                           dap_chain_net_srv_callback_data_t a_callback_receipt_next_success,
+                                           dap_chain_net_srv_callback_custom_data_t a_callback_custom_data)
+
 {
     service_list_t *l_sdata = NULL;
     dap_chain_net_srv_t * l_srv = NULL;
@@ -618,14 +728,15 @@ dap_chain_net_srv_t* dap_chain_net_srv_add(dap_chain_net_srv_uid_t a_uid,dap_cha
         l_srv->callback_response_success = a_callback_response_success;
         l_srv->callback_response_error = a_callback_response_error;
         l_srv->callback_receipt_next_success = a_callback_receipt_next_success;
+        l_srv->callback_custom_data = a_callback_custom_data;
         pthread_mutex_init(&l_srv->banlist_mutex, NULL);
         l_sdata = DAP_NEW_Z(service_list_t);
         memcpy(&l_sdata->uid, &l_uid, sizeof(l_uid));
         l_sdata->srv = l_srv;
+        dap_chain_net_srv_parse_pricelist(l_srv, a_config_section);
         HASH_ADD(hh, s_srv_list, uid, sizeof(l_srv->uid), l_sdata);
     }else{
         log_it(L_ERROR, "Already present service with 0x%016"DAP_UINT64_FORMAT_X, a_uid.uint64);
-        //l_srv = l_sdata->srv;
     }
     pthread_mutex_unlock(&s_srv_list_mutex);
     return l_srv;
@@ -642,10 +753,8 @@ dap_chain_net_srv_t* dap_chain_net_srv_add(dap_chain_net_srv_uid_t a_uid,dap_cha
  */
 int dap_chain_net_srv_set_ch_callbacks(dap_chain_net_srv_uid_t a_uid,
                                        dap_chain_net_srv_callback_ch_t a_callback_stream_ch_opened,
-                                       dap_chain_net_srv_callback_data_t a_callback_stream_ch_read,
-                                       dap_chain_net_srv_callback_data_with_out_data_t a_callback_stream_ch_read_with_out_data,
-                                       dap_chain_net_srv_callback_ch_t a_callback_stream_ch_write,
-                                       dap_chain_net_srv_callback_ch_t a_callback_stream_ch_closed
+                                       dap_chain_net_srv_callback_ch_t a_callback_stream_ch_closed,
+                                       dap_chain_net_srv_callback_ch_t a_callback_stream_ch_write
                                        )
 {
     service_list_t *l_sdata = NULL;
@@ -658,10 +767,8 @@ int dap_chain_net_srv_set_ch_callbacks(dap_chain_net_srv_uid_t a_uid,
     if( l_sdata ) {
         l_srv = l_sdata->srv;
         l_srv->callback_stream_ch_opened = a_callback_stream_ch_opened;
-        l_srv->callback_stream_ch_read = a_callback_stream_ch_read;
-        l_srv->callback_stream_ch_read_with_out_data = a_callback_stream_ch_read_with_out_data;
-        l_srv->callback_stream_ch_write = a_callback_stream_ch_write;
         l_srv->callback_stream_ch_closed = a_callback_stream_ch_closed;
+        l_srv->callback_stream_ch_write = a_callback_stream_ch_write;
     }else{
         log_it(L_ERROR, "Can't find service with 0x%016"DAP_UINT64_FORMAT_X, a_uid.uint64);
         l_ret= -1;
@@ -747,6 +854,7 @@ void dap_chain_net_srv_del_all(void)
     pthread_mutex_lock(&s_srv_list_mutex);
     HASH_ITER(hh, s_srv_list , l_sdata, l_sdata_tmp)
     {
+        // Clang bug at this, l_sdata should change at every loop cycle
         HASH_DEL(s_srv_list, l_sdata);
         pthread_mutex_destroy(&l_sdata->srv->banlist_mutex);
         DAP_DELETE(l_sdata->srv);
@@ -829,24 +937,14 @@ const dap_chain_net_srv_uid_t * dap_chain_net_srv_list(void)
  * @param a_price
  * @return
  */
-dap_chain_datum_tx_receipt_t * dap_chain_net_srv_issue_receipt(dap_chain_net_srv_t *a_srv,
-                dap_chain_net_srv_usage_t * a_usage,
-                dap_chain_net_srv_price_t * a_price,
-                const void * a_ext, size_t a_ext_size
-                )
+dap_chain_datum_tx_receipt_t * dap_chain_net_srv_issue_receipt(dap_chain_net_srv_t *a_srv,                                                         
+                                                               dap_chain_net_srv_price_t * a_price,
+                                                               const void * a_ext, size_t a_ext_size)
 {
     dap_chain_datum_tx_receipt_t * l_receipt = dap_chain_datum_tx_receipt_create(
                     a_srv->uid, a_price->units_uid, a_price->units, a_price->value_datoshi, a_ext, a_ext_size);
-    size_t l_receipt_size = l_receipt->size; // nested receipt plus 8 bits for type
-
     // Sign with our wallet
-    l_receipt_size = dap_chain_datum_tx_receipt_sign_add(&l_receipt,l_receipt_size , dap_chain_wallet_get_key( a_price->wallet,0) );
-
-    a_usage->receipt = l_receipt;
-    a_usage->receipt_size = l_receipt_size;
-    a_usage->wallet = a_price->wallet;
-
-    return  l_receipt;
+    return dap_chain_datum_tx_receipt_sign_add(l_receipt, dap_chain_wallet_get_key(a_price->wallet, 0));
 }
 
 

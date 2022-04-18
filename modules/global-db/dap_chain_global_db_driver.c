@@ -20,6 +20,12 @@
 
  You should have received a copy of the GNU General Public License
  along with any DAP based project.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *  MODIFICATION HISTORY:
+ *
+ *      24-FEB-2022 RRL Added Async I/O functionality for DB request processing
+ *
+ *      15-MAR-2022 RRL Some cosmetic changes to reduce a diagnostic output.
  */
 
 #include <stddef.h>
@@ -27,13 +33,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <pthread.h>
-#include <assert.h>
+#include <unistd.h>
 
-#include "dap_common.h"
+#include "dap_worker.h"
 #include "dap_file_utils.h"
 #include "dap_strfuncs.h"
-#include "dap_list.h"
 #include "dap_hash.h"
+#include "dap_proc_queue.h"
+#include "dap_events.h"
+#include "dap_list.h"
+#include "dap_common.h"
 
 #include "dap_chain_global_db_driver_sqlite.h"
 #include "dap_chain_global_db_driver_cdb.h"
@@ -44,55 +53,51 @@
 #define LOG_TAG "db_driver"
 
 // A selected database driver.
-static char *s_used_driver = NULL;
+static char s_used_driver [32];                                             /* Name of the driver */
 
-//#define USE_WRITE_BUFFER
 
-#ifdef USE_WRITE_BUFFER
-static int save_write_buf(void);
+static dap_db_driver_callbacks_t s_drv_callback;                            /* A set of interface routines for the selected
+                                                                            DB Driver at startup time */
 
-// for write buffer
-pthread_mutex_t s_mutex_add_start = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t s_mutex_add_end = PTHREAD_MUTEX_INITIALIZER;
-//pthread_rwlock_rdlock
-// new data in buffer to write
-pthread_mutex_t s_mutex_cond = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t s_cond_add_end; // = PTHREAD_COND_INITIALIZER;
-// writing ended
-pthread_mutex_t s_mutex_write_end = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t s_cond_write_end; // = PTHREAD_COND_INITIALIZER;
+extern  int s_db_drvmode_async ,                                            /* Set a kind of processing requests to DB:
+                                                                            <> 0 - Async mode should be used */
+        s_dap_global_db_debug_more;                                         /* Enable extensible debug output */
 
-dap_list_t *s_list_begin = NULL;
-dap_list_t *s_list_end = NULL;
+static pthread_mutex_t s_db_reqs_list_lock = PTHREAD_MUTEX_INITIALIZER;     /* Lock to coordinate access to the <s_db_reqs_queue> */
+static dap_slist_t s_db_reqs_list = {0};                                    /* A queue of request to DB - maintained in */
 
-pthread_t s_write_buf_thread;
-volatile static bool s_write_buf_state = 0;
-static void* func_write_buf(void * arg);
-#endif //USE_WRITE_BUFFER
-
-static dap_db_driver_callbacks_t s_drv_callback;
 
 /**
- * @brief Initializes a database driver. 
+ * @brief Initializes a database driver.
  * @note You should Call this function before using the driver.
  * @param driver_name a string determining a type of database driver:
  * "сdb", "sqlite" ("sqlite3") or "pgsql"
  * @param a_filename_db a path to a database file
  * @return Returns 0, if successful; otherwise <0.
  */
-int dap_db_driver_init(const char *a_driver_name, const char *a_filename_db)
+int dap_db_driver_init(const char *a_driver_name, const char *a_filename_db, int a_mode_async)
 {
-    int l_ret = -1;
-    if(s_used_driver)
+int l_ret = -1;
+
+    if (s_used_driver[0] )
         dap_db_driver_deinit();
+
+    s_db_drvmode_async = a_mode_async;
 
     // Fill callbacks with zeros
     memset(&s_drv_callback, 0, sizeof(dap_db_driver_callbacks_t));
 
+    if ( s_db_drvmode_async )                                               /* Set a kind of processing requests to DB: <> 0 - Async mode should be used */
+    {
+        s_db_reqs_list.head = s_db_reqs_list.tail = NULL;
+        s_db_reqs_list.nr = 0;
+    }
+
     // Setup driver name
-    s_used_driver = dap_strdup(a_driver_name);
+    strncpy( s_used_driver, a_driver_name, sizeof(s_used_driver) - 1);
 
     dap_mkdir_with_parents(a_filename_db);
+
     // Compose path
     char l_db_path_ext[strlen(a_driver_name) + strlen(a_filename_db) + 6];
     dap_snprintf(l_db_path_ext, sizeof(l_db_path_ext), "%s/gdb-%s", a_filename_db, a_driver_name);
@@ -104,6 +109,7 @@ int dap_db_driver_init(const char *a_driver_name, const char *a_filename_db)
         l_ret = dap_db_driver_sqlite_init(l_db_path_ext, &s_drv_callback);
     else if(!dap_strcmp(s_used_driver, "cdb"))
         l_ret = dap_db_driver_cdb_init(l_db_path_ext, &s_drv_callback);
+
 #ifdef DAP_CHAIN_GDB_ENGINE_MDBX
     else if(!dap_strcmp(s_used_driver, "mdbx"))
         l_ret = dap_db_driver_mdbx_init(l_db_path_ext, &s_drv_callback);
@@ -114,18 +120,7 @@ int dap_db_driver_init(const char *a_driver_name, const char *a_filename_db)
 #endif
     else
         log_it(L_ERROR, "Unknown global_db driver \"%s\"", a_driver_name);
-#ifdef USE_WRITE_BUFFER
-    if(!l_ret) {
-        pthread_condattr_t l_condattr;
-        pthread_condattr_init(&l_condattr);
-        pthread_condattr_setclock(&l_condattr, CLOCK_MONOTONIC);
-        pthread_cond_init(&s_cond_add_end, &l_condattr);
-        pthread_cond_init(&s_cond_write_end, &l_condattr);
-        // thread for save buffer to database
-        s_write_buf_state = true;
-        pthread_create(&s_write_buf_thread, NULL, func_write_buf, NULL);
-    }
-#endif
+
     return l_ret;
 }
 
@@ -136,40 +131,24 @@ int dap_db_driver_init(const char *a_driver_name, const char *a_filename_db)
  */
 void dap_db_driver_deinit(void)
 {
-#ifdef USE_WRITE_BUFFER
-    // wait for close thread
+    log_it(L_NOTICE, "DeInit for %s ...", s_used_driver);
+
+    if ( s_db_drvmode_async )                                               /* Let's finishing outstanding DB request ... */
     {
-        pthread_mutex_lock(&s_mutex_cond);
-        pthread_cond_broadcast(&s_cond_add_end);
-        pthread_mutex_unlock(&s_mutex_cond);
+        for ( int i = 7; i-- && s_db_reqs_list.nr; )
+        {
+            log_it(L_WARNING, "Let's finished outstanding DB requests (%d) ... ",  s_db_reqs_list.nr);
+            for ( int j = 3; (j = sleep(j)); );                             /* Hibernate for 3 seconds ... */
+        }
 
-        s_write_buf_state = false;
-        pthread_join(s_write_buf_thread, NULL);
+        log_it(L_INFO, "Number of outstanding DB requests: %d",  s_db_reqs_list.nr);
     }
 
-    //save_write_buf();
-    pthread_mutex_lock(&s_mutex_add_end);
-    pthread_mutex_lock(&s_mutex_add_start);
-    while(s_list_begin != s_list_end) {
-        // free memory
-        dap_store_obj_free((dap_store_obj_t*) s_list_begin->data, 1);
-        dap_list_free1(s_list_begin);
-        s_list_begin = dap_list_next(s_list_begin);
-    }
-    //dap_store_obj_free((dap_store_obj_t*) s_list_begin->data, 1);
-    dap_list_free1(s_list_begin);
-    s_list_begin = s_list_end = NULL;
-    pthread_mutex_unlock(&s_mutex_add_start);
-    pthread_mutex_unlock(&s_mutex_add_end);
-    pthread_cond_destroy(&s_cond_add_end);
-#endif
     // deinit driver
     if(s_drv_callback.deinit)
         s_drv_callback.deinit();
-    if(s_used_driver){
-        DAP_DELETE(s_used_driver);
-        s_used_driver = NULL;
-    }
+
+    s_used_driver [ 0 ] = '\0';
 }
 
 /**
@@ -178,7 +157,7 @@ void dap_db_driver_deinit(void)
  */
 int dap_db_driver_flush(void)
 {
-    return s_drv_callback.flush();
+    return s_db_drvmode_async ? 0 : s_drv_callback.flush();
 }
 
 /**
@@ -189,17 +168,28 @@ int dap_db_driver_flush(void)
  */
 dap_store_obj_t* dap_store_obj_copy(dap_store_obj_t *a_store_obj, size_t a_store_count)
 {
+dap_store_obj_t *l_store_obj, *l_store_obj_dst, *l_store_obj_src;
+
     if(!a_store_obj || !a_store_count)
         return NULL;
-    dap_store_obj_t *l_store_obj = DAP_NEW_SIZE(dap_store_obj_t, sizeof(dap_store_obj_t) * a_store_count);
-    for(size_t i = 0; i < a_store_count; i++) {
-        dap_store_obj_t *l_store_obj_dst = l_store_obj + i;
-        dap_store_obj_t *l_store_obj_src = a_store_obj + i;
-        memcpy(l_store_obj_dst, l_store_obj_src, sizeof(dap_store_obj_t));
+
+    if ( !(l_store_obj = DAP_NEW_SIZE(dap_store_obj_t, sizeof(dap_store_obj_t) * a_store_count)) )
+         return NULL;
+
+    l_store_obj_dst = l_store_obj;
+    l_store_obj_src = a_store_obj;
+
+    for( int i =  a_store_count; i--; l_store_obj_dst++, l_store_obj_src++)
+    {
+        *l_store_obj_dst = *l_store_obj_src;
+
         l_store_obj_dst->group = dap_strdup(l_store_obj_src->group);
         l_store_obj_dst->key = dap_strdup(l_store_obj_src->key);
         l_store_obj_dst->value = DAP_DUP_SIZE(l_store_obj_src->value, l_store_obj_src->value_len);
+        l_store_obj_dst->cb = l_store_obj_src->cb;
+        l_store_obj_dst->cb_arg = l_store_obj_src->cb_arg;
     }
+
     return l_store_obj;
 }
 
@@ -213,13 +203,15 @@ void dap_store_obj_free(dap_store_obj_t *a_store_obj, size_t a_store_count)
 {
     if(!a_store_obj)
         return;
-    for(size_t i = 0; i < a_store_count; i++) {
-        dap_store_obj_t *l_store_obj_cur = a_store_obj + i;
-        DAP_DELETE(l_store_obj_cur->group);
-        DAP_DELETE(l_store_obj_cur->key);
-        DAP_DELETE(l_store_obj_cur->value);
+
+    dap_store_obj_t *l_store_obj_cur = a_store_obj;
+
+    for ( ; a_store_count--; l_store_obj_cur++ ) {
+        DAP_DEL_Z(l_store_obj_cur->group);
+        DAP_DEL_Z(l_store_obj_cur->key);
+        DAP_DEL_Z(l_store_obj_cur->value);
     }
-    DAP_DELETE(a_store_obj);
+    DAP_DEL_Z(a_store_obj);
 }
 
 /**
@@ -232,6 +224,7 @@ char* dap_chain_global_db_driver_hash(const uint8_t *data, size_t data_size)
 {
     if(!data || !data_size)
         return NULL;
+
     dap_chain_hash_fast_t l_hash;
     memset(&l_hash, 0, sizeof(dap_chain_hash_fast_t));
     dap_hash_fast(data, data_size, &l_hash);
@@ -245,162 +238,6 @@ char* dap_chain_global_db_driver_hash(const uint8_t *data, size_t data_size)
     return a_str;
 }
 
-/**
- * @brief Waits for a buffer to be written.
- * @param a_mutex a mutex
- * @param a_cond a condition
- * @param l_timeout_ms timeout in ms, if -1 endless waiting
- * @return Returns 0 if successful or 1 when the timeout is due.
- */
-static int wait_data(pthread_mutex_t *a_mutex, pthread_cond_t *a_cond, int l_timeout_ms)
-{
-    int l_res = 0;
-    pthread_mutex_lock(a_mutex);
-    // endless waiting
-    if(l_timeout_ms == -1)
-        l_res = pthread_cond_wait(a_cond, a_mutex);
-    // waiting no more than timeout in milliseconds
-    else {
-        struct timespec l_to;
-        clock_gettime(CLOCK_MONOTONIC, &l_to);
-        int64_t l_nsec_new = l_to.tv_nsec + l_timeout_ms * 1000000ll;
-        // if the new number of nanoseconds is more than a second
-        if(l_nsec_new > (long) 1e9) {
-            l_to.tv_sec += l_nsec_new / (long) 1e9;
-            l_to.tv_nsec = l_nsec_new % (long) 1e9;
-        }
-        else
-            l_to.tv_nsec = (long) l_nsec_new;
-        l_res = pthread_cond_timedwait(a_cond, a_mutex, &l_to);
-    }
-    pthread_mutex_unlock(a_mutex);
-    if(l_res == ETIMEDOUT)
-        return 1;
-    return l_res;
-}
-
-#ifdef USE_WRITE_BUFFER
-/**
- * @brief Checks if a buffer is not empty.
- * @return Returns true if the buffer is not empty, false if it is empty.
- */
-static bool check_fill_buf(void)
-{
-    dap_list_t *l_list_begin;
-    dap_list_t *l_list_end;
-    pthread_mutex_lock(&s_mutex_add_start);
-    pthread_mutex_lock(&s_mutex_add_end);
-    l_list_end = s_list_end;
-    l_list_begin = s_list_begin;
-    pthread_mutex_unlock(&s_mutex_add_end);
-    pthread_mutex_unlock(&s_mutex_add_start);
-
-    bool l_ret = (l_list_begin != l_list_end) ? 1 : 0;
-//    if(l_ret)
-//        printf("** Wait s_beg=0x%x s_end=0x%x \n", l_list_begin, l_list_end);
-    return l_ret;
-}
-
-/**
- * @brief Waits until the buffer is not empty.
- * @return (none)
- */
-static void wait_write_buf()
-{
-//    printf("** Start wait data\n");
-    // wait data
-    while(1) {
-        if(!check_fill_buf())
-            break;
-        if(!wait_data(&s_mutex_write_end, &s_cond_write_end, 50))
-            break;
-    }
-//    printf("** End wait data\n");
-}
-
-/**
- * @brief Saves data from a buffer to a database.
- * @return 0
- */
-static int save_write_buf(void)
-{
-    dap_list_t *l_list_end;
-    // fix end of buffer
-    pthread_mutex_lock(&s_mutex_add_end);
-    l_list_end = s_list_end;
-    pthread_mutex_unlock(&s_mutex_add_end);
-    // save data from begin to fixed end
-    pthread_mutex_lock(&s_mutex_add_start);
-    if(s_list_begin != l_list_end) {
-        if(s_drv_callback.transaction_start)
-            s_drv_callback.transaction_start();
-        int cnt = 0;
-        while(s_list_begin != l_list_end) {
-            // apply to database
-            dap_store_obj_t *l_obj = s_list_begin->data;
-            assert(l_obj);
-            if(s_drv_callback.apply_store_obj) {
-                int l_ret_tmp = s_drv_callback.apply_store_obj(l_obj);
-                if(l_ret_tmp == 1) {
-                    log_it(L_INFO, "item is missing (may be already deleted) %s/%s\n", l_obj->group, l_obj->key);
-                    l_ret = 1;
-                }
-                if(l_ret_tmp < 0) {
-                    log_it(L_ERROR, "Can't write item %s/%s\n", l_obj->group, l_obj->key);
-                    l_ret -= 1;
-                }
-                /*if(!s_drv_callback.apply_store_obj(l_obj)) {
-                    //log_it(L_INFO, "Write item Ok %s/%s\n", l_obj->group, l_obj->key);
-                }
-                else {
-                    log_it(L_ERROR, "Can't write item %s/%s\n", l_obj->group, l_obj->key);
-                }*/
-            }
-
-            s_list_begin = dap_list_next(s_list_begin);
-//            printf("** ap2*record *l_beg=0x%x l_nex=0x%x d_beg=0x%x l_end=0x%x d_end=0x%x sl_end=0x%x\n", s_list_begin,
-            //                  s_list_begin->next, s_list_begin->data, l_list_end, l_list_end->data, s_list_end);
-
-            //printf("** free data=0x%x list=0x%x\n", s_list_begin->prev->data, s_list_begin->prev);
-            // free memory
-            dap_store_obj_free((dap_store_obj_t*) s_list_begin->prev->data, 1);
-            dap_list_free1(s_list_begin->prev);
-            s_list_begin->prev = NULL;
-            cnt++;
-        }
-        if(s_drv_callback.transaction_end)
-            s_drv_callback.transaction_end();
-        //printf("** writing ended cnt=%d\n", cnt);
-        // writing ended
-        pthread_mutex_lock(&s_mutex_write_end);
-        pthread_cond_broadcast(&s_cond_write_end);
-        pthread_mutex_unlock(&s_mutex_write_end);
-    }
-    pthread_mutex_unlock(&s_mutex_add_start);
-    return 0;
-}
-
-/**
- * @brief A thread for saving data from buffer to a database
- * @param arg NULL, is not used
- * @return NULL
- */
-static void* func_write_buf(void * arg)
-{
-    while(1) {
-        if(!s_write_buf_state)
-            break;
-        //save_write_buf
-        if(save_write_buf() == 0) {
-            if(!s_write_buf_state)
-                break;
-            // wait data
-            wait_data(&s_mutex_cond, &s_cond_add_end, 2000); // 2 sec
-        }
-    }
-    return NULL;
-}
-#endif //USE_WRITE_BUFFER
 
 /**
  * @brief Applies objects to database.
@@ -408,67 +245,136 @@ static void* func_write_buf(void * arg)
  * @param a_store_count a number of objectss
  * @return Returns 0, if successful.
  */
-int dap_chain_global_db_driver_appy(pdap_store_obj_t a_store_obj, size_t a_store_count)
+static inline  int s_dap_chain_global_db_driver_apply_do(dap_store_obj_t *a_store_obj, size_t a_store_count)
 {
-    //dap_store_obj_t *l_store_obj = dap_store_obj_copy(a_store_obj, a_store_count);
+int l_ret;
+dap_store_obj_t *l_store_obj_cur;
+
     if(!a_store_obj || !a_store_count)
         return -1;
-#ifdef USE_WRITE_BUFFER
-    // add all records into write buffer
-    pthread_mutex_lock(&s_mutex_add_end);
-    for(size_t i = 0; i < a_store_count; i++) {
-        dap_store_obj_t *l_store_obj_cur = dap_store_obj_copy(a_store_obj + i, 1);
-        // first record in buf
-        if(!s_list_end) {
-            s_list_end = dap_list_append(s_list_end, l_store_obj_cur);
-            pthread_mutex_lock(&s_mutex_add_start);
-            s_list_begin = s_list_end;
-            pthread_mutex_unlock(&s_mutex_add_start);
-            //log_it(L_DEBUG,"First record in list: *!!add record=0x%x / 0x%x    obj=0x%x / 0x%x\n", s_list_end, s_list_end->data, s_list_end->prev);
-        }
-        else
-            s_list_end->data = l_store_obj_cur;
-        dap_list_append(s_list_end, NULL);
-        s_list_end = dap_list_last(s_list_end);
-        //log_it(L_DEBUG, "**+add record l_cur=0x%x / 0x%x l_new=0x%x / 0x%x\n", s_list_end->prev, s_list_end->prev->data,s_list_end, s_list_end->data);
-    }
-    // buffer changed
-    pthread_mutex_lock(&s_mutex_cond);
-    pthread_cond_broadcast(&s_cond_add_end);
-    pthread_mutex_unlock(&s_mutex_cond);
-    pthread_mutex_unlock(&s_mutex_add_end);
-    return 0;
-#else
-    int l_ret = 0;
-    // apply to database
-    if(a_store_count > 1 && s_drv_callback.transaction_start)
+
+    debug_if(s_dap_global_db_debug_more, L_DEBUG, "[%p] Process DB Request ...", a_store_obj);
+
+    l_store_obj_cur = a_store_obj;                                          /* We have to  use a power of the address's incremental arithmetic */
+    l_ret = 0;                                                              /* Preset return code to OK */
+
+    if (a_store_count > 1 && s_drv_callback.transaction_start)
         s_drv_callback.transaction_start();
 
     if(s_drv_callback.apply_store_obj)
-        for(size_t i = 0; i < a_store_count; i++) {
-            dap_store_obj_t *l_store_obj_cur = a_store_obj + i;
-            assert(l_store_obj_cur);
-            char *l_cur_key = dap_strdup(l_store_obj_cur->key);
-            int l_ret_tmp = s_drv_callback.apply_store_obj(l_store_obj_cur);
-            if(l_ret_tmp == 1) {
-                log_it(L_INFO, "Item is missing (may be already deleted) %s/%s\n", l_store_obj_cur->group, l_cur_key);
-                l_ret = 1;
-            }
-            if(l_ret_tmp < 0) {
-                log_it(L_ERROR, "Can't write item %s/%s (code %d)\n", l_store_obj_cur->group, l_cur_key, l_ret_tmp);
-                l_ret -= 1;
-            }
-            DAP_DEL_Z(l_cur_key);
-            if (l_ret)
-                break;
+        for(int i = a_store_count; (!l_ret) && (i--); l_store_obj_cur++) {
+            if ( 1 == (l_ret = s_drv_callback.apply_store_obj(l_store_obj_cur)) )
+                log_it(L_INFO, "[%p] Item is missing (may be already deleted) %s/%s", a_store_obj, l_store_obj_cur->group, l_store_obj_cur->key);
+            else if (l_ret < 0)
+                log_it(L_ERROR, "[%p] Can't write item %s/%s (code %d)", a_store_obj, l_store_obj_cur->group, l_store_obj_cur->key, l_ret);
         }
 
     if(a_store_count > 1 && s_drv_callback.transaction_end)
         s_drv_callback.transaction_end();
-    return l_ret;
-#endif
 
+    debug_if(s_dap_global_db_debug_more, L_DEBUG, "[%p] Finished DB Request (code %d)", a_store_obj, l_ret);
+    return l_ret;
 }
+
+static bool s_dap_driver_req_exec (struct dap_proc_thread *a_dap_thd __attribute__((unused)),
+                                   void *arg __attribute__((unused)) )
+{
+int l_ret;
+dap_store_obj_t *l_store_obj_cur;
+dap_worker_t        *l_dap_worker;
+size_t l_store_obj_cnt;
+
+    debug_if(s_dap_global_db_debug_more, L_DEBUG, "Entering, %d entries in the queue ...",  s_db_reqs_list.nr);
+
+    if ( (l_ret = pthread_mutex_lock(&s_db_reqs_list_lock)) )               /* Get exclusive access to the request list */
+         return log_it(L_ERROR, "Cannot lock request queue, errno=%d",l_ret), 0;
+
+    if ( !s_db_reqs_list.nr )                                               /* Nothing to do ?! Just exit */
+    {
+        pthread_mutex_unlock(&s_db_reqs_list_lock);
+        return  1;                                                          /* 1 - Don't call it again */
+    }
+
+    if ( (l_ret = s_dap_remqhead (&s_db_reqs_list, (void **)  &l_store_obj_cur, &l_store_obj_cnt)) )
+    {
+        pthread_mutex_unlock(&s_db_reqs_list_lock);
+        log_it(L_ERROR, "DB Request list is in incosistence state (code %d)", l_ret);
+        return  1;                                                          /* 1 - Don't call it again */
+    }
+
+    /* So at this point we are ready to do work in the DB */
+    s_dap_chain_global_db_driver_apply_do(l_store_obj_cur, l_store_obj_cnt);
+
+    pthread_mutex_unlock(&s_db_reqs_list_lock);
+
+
+    /* Is there a callback  ? */
+    if ( s_db_drvmode_async && l_store_obj_cur->cb )
+        {
+        /* Enqueue "Exec Complete" callback routine */
+        l_dap_worker = dap_events_worker_get_auto ();
+
+        if ( (l_ret = dap_proc_queue_add_callback(l_dap_worker, l_store_obj_cur->cb, (void *)l_store_obj_cur->cb_arg)) )
+            log_it(L_ERROR, "[%p] Enqueue completion callback for item %s/%s (code %d)", l_store_obj_cur,
+                   l_store_obj_cur->group, l_store_obj_cur->key, l_ret);
+        }
+
+    dap_store_obj_free (l_store_obj_cur, l_store_obj_cnt);                  /* Release a memory !!! */
+
+    return  1;  /* 1 - Don't call it again */
+}
+
+
+/**
+ * @brief Applies objects to database.
+ * @param a_store an pointer to the objects
+ * @param a_store_count a number of objectss
+ * @return Returns 0, if successful.
+ */
+int dap_chain_global_db_driver_apply(dap_store_obj_t *a_store_obj, size_t a_store_count)
+{
+int l_ret;
+dap_store_obj_t *l_store_obj_cur;
+dap_worker_t        *l_dap_worker;
+
+    if(!a_store_obj || !a_store_count)
+        return -1;
+
+    if ( !s_db_drvmode_async )
+        return s_dap_chain_global_db_driver_apply_do(a_store_obj, a_store_count);
+
+
+
+
+
+    /* Async mode - put request into the list for deffered processing */
+    l_ret = -ENOMEM;                                                    /* Preset return code to non-OK  */
+
+    pthread_mutex_lock(&s_db_reqs_list_lock);                           /* Get exclusive access to the request list */
+
+    if ( !(l_store_obj_cur = dap_store_obj_copy(a_store_obj, a_store_count)) )
+        l_ret = - ENOMEM, log_it(L_ERROR, "[%p] No memory for DB Request for item %s/%s", a_store_obj, a_store_obj->group, a_store_obj->key);
+    else if ( (l_ret = s_dap_insqtail (&s_db_reqs_list, l_store_obj_cur, a_store_count)) )
+        log_it(L_ERROR, "[%p] Can't enqueue DB request for item %s/%s (code %d)", a_store_obj, a_store_obj->group, a_store_obj->key, l_ret);
+
+    pthread_mutex_unlock(&s_db_reqs_list_lock);
+
+    if ( !l_ret )
+        {                                                                /* So finaly enqueue an execution routine */
+        if ( !(l_dap_worker = dap_events_worker_get_auto ()) )
+            l_ret = -EBUSY, log_it(L_ERROR, "[%p] Error process DB request for %s/%s, dap_events_worker_get_auto()->NULL", a_store_obj, l_store_obj_cur->group, l_store_obj_cur->key);
+        else l_ret = dap_proc_queue_add_callback(l_dap_worker, s_dap_driver_req_exec, NULL);
+        }
+
+    debug_if(s_dap_global_db_debug_more, L_DEBUG, "[%p] DB Request has been enqueued (code %d)", l_store_obj_cur, l_ret);
+
+    return  l_ret;
+}
+
+
+
+
+
 
 /**
  * @brief Adds objects to a database.
@@ -478,9 +384,12 @@ int dap_chain_global_db_driver_appy(pdap_store_obj_t a_store_obj, size_t a_store
  */
 int dap_chain_global_db_driver_add(pdap_store_obj_t a_store_obj, size_t a_store_count)
 {
-    for(size_t i = 0; i < a_store_count; i++)
-        a_store_obj[i].type = 'a';
-    return dap_chain_global_db_driver_appy(a_store_obj, a_store_count);
+dap_store_obj_t *l_store_obj_cur = a_store_obj;
+
+    for(int i = a_store_count; i--; l_store_obj_cur++)
+        l_store_obj_cur->type = DAP_DB$K_OPTYPE_ADD;
+
+    return dap_chain_global_db_driver_apply(a_store_obj, a_store_count);
 }
 
 /**
@@ -491,9 +400,12 @@ int dap_chain_global_db_driver_add(pdap_store_obj_t a_store_obj, size_t a_store_
  */
 int dap_chain_global_db_driver_delete(pdap_store_obj_t a_store_obj, size_t a_store_count)
 {
-    for(size_t i = 0; i < a_store_count; i++)
-        a_store_obj[i].type = 'd';
-    return dap_chain_global_db_driver_appy(a_store_obj, a_store_count);
+dap_store_obj_t *l_store_obj_cur = a_store_obj;
+
+    for(int i = a_store_count; i--; l_store_obj_cur++)
+        l_store_obj_cur->type = DAP_DB$K_OPTYPE_DEL;
+
+    return dap_chain_global_db_driver_apply(a_store_obj, a_store_count);
 }
 
 /**
@@ -535,10 +447,6 @@ dap_list_t *dap_chain_global_db_driver_get_groups_by_mask(const char *a_group_ma
 dap_store_obj_t* dap_chain_global_db_driver_read_last(const char *a_group)
 {
     dap_store_obj_t *l_ret = NULL;
-#ifdef USE_WRITE_BUFFER
-    // wait apply write buffer
-    wait_write_buf();
-#endif
     // read records using the selected database engine
     if(s_drv_callback.read_last_store_obj)
         l_ret = s_drv_callback.read_last_store_obj(a_group);
@@ -556,10 +464,6 @@ dap_store_obj_t* dap_chain_global_db_driver_read_last(const char *a_group)
 dap_store_obj_t* dap_chain_global_db_driver_cond_read(const char *a_group, uint64_t id, size_t *a_count_out)
 {
     dap_store_obj_t *l_ret = NULL;
-#ifdef USE_WRITE_BUFFER
-    // wait apply write buffer
-    wait_write_buf();
-#endif
     // read records using the selected database engine
     if(s_drv_callback.read_cond_store_obj)
         l_ret = s_drv_callback.read_cond_store_obj(a_group, id, a_count_out);
@@ -578,10 +482,6 @@ dap_store_obj_t* dap_chain_global_db_driver_cond_read(const char *a_group, uint6
 dap_store_obj_t* dap_chain_global_db_driver_read(const char *a_group, const char *a_key, size_t *a_count_out)
 {
     dap_store_obj_t *l_ret = NULL;
-#ifdef USE_WRITE_BUFFER
-    // wait apply write buffer
-    wait_write_buf();
-#endif
     // read records using the selected database engine
     if(s_drv_callback.read_store_obj)
         l_ret = s_drv_callback.read_store_obj(a_group, a_key, a_count_out);

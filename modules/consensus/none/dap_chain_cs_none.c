@@ -33,6 +33,7 @@
 #include "dap_strfuncs.h"
 #include "dap_config.h"
 #include "dap_hash.h"
+#include "dap_chain_cell.h"
 #include "dap_chain_ledger.h"
 #include "dap_chain_global_db.h"
 #include "dap_chain_global_db_driver.h"
@@ -70,7 +71,7 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
 static dap_chain_atom_verify_res_t s_chain_callback_atom_verify(dap_chain_t * a_chain, dap_chain_atom_ptr_t, size_t); //    Verify new event in gdb
 static size_t s_chain_callback_atom_get_static_hdr_size(void); //    Get gdb event header size
 
-static dap_chain_atom_iter_t* s_chain_callback_atom_iter_create(dap_chain_t * a_chain);
+static dap_chain_atom_iter_t* s_chain_callback_atom_iter_create(dap_chain_t * a_chain, dap_chain_cell_id_t a_cell_id, bool a_with_treshold);
 static dap_chain_atom_iter_t* s_chain_callback_atom_iter_create_from(dap_chain_t * a_chain,
         dap_chain_atom_ptr_t a, size_t a_atom_size);
 
@@ -140,7 +141,6 @@ static void s_history_callback_notify(void * a_arg, const char a_op_code, const 
         dap_chain_net_t *l_net = dap_chain_net_by_id( l_gdb->chain->net_id);
         log_it(L_DEBUG,"%s.%s: op_code='%c' group=\"%s\" key=\"%s\" value_size=%zu",l_net->pub.name,
                l_gdb->chain->name, a_op_code, a_group, a_key, a_value_size);
-        dap_chain_node_mempool_autoproc_notify((void *)l_net, a_op_code, a_group, a_key, a_value, a_value_size);
         dap_chain_net_sync_gdb_broadcast((void *)l_net, a_op_code, a_group, a_key, a_value, a_value_size);
     }
 }
@@ -181,11 +181,11 @@ int dap_chain_gdb_new(dap_chain_t * a_chain, dap_config_t * a_chain_cfg)
     }else {
         // here is not work because dap_chain_net_load() not yet fully performed
         l_gdb_priv->group_datums = dap_strdup_printf( "chain-gdb.%s.chain-%016llX.cell-%016llX",l_net->pub.name,
-                                                  a_chain->id.uint64, l_net->pub.cell_id.uint64);
+                                                  a_chain->id.uint64, a_chain->cells->id.uint64);
     }
 
     // Add group prefix that will be tracking all changes
-    dap_chain_global_db_add_sync_group("chain-gdb", s_history_callback_notify, l_gdb);
+    dap_chain_global_db_add_sync_group(l_net->pub.name, "chain-gdb", s_history_callback_notify, l_gdb);
 
     // load ledger
     l_gdb_priv->is_load_mode = true;
@@ -345,8 +345,7 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
     }
     switch (l_datum->header.type_id) {
         case DAP_CHAIN_DATUM_TOKEN_DECL:{
-            dap_chain_datum_token_t *l_token = (dap_chain_datum_token_t*) l_datum->data;
-            if (dap_chain_ledger_token_load(a_chain->ledger,l_token, l_datum->header.data_size))
+            if (dap_chain_ledger_token_load(a_chain->ledger, (dap_chain_datum_token_t *)l_datum->data, l_datum->header.data_size))
                 return ATOM_REJECT;
         }break;
         case DAP_CHAIN_DATUM_TOKEN_EMISSION: {
@@ -355,15 +354,20 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
         }break;
         case DAP_CHAIN_DATUM_TX:{
             dap_chain_datum_tx_t *l_tx = (dap_chain_datum_tx_t*) l_datum->data;
-            // No trashhold herr, don't save bad transactions to base
-            if(dap_chain_ledger_tx_load(a_chain->ledger, l_tx, NULL) != 1)
+            // TODO process with different codes from ledger to work with ledger thresholds
+            if (dap_chain_ledger_tx_load(a_chain->ledger, l_tx, NULL) != 1)
                 return ATOM_REJECT;
         }break;
         case DAP_CHAIN_DATUM_CA:{
             if ( dap_cert_chain_file_save(l_datum, a_chain->net_name) < 0 )
                 return ATOM_REJECT;
         }break;
-        default: return ATOM_REJECT;
+        case DAP_CHAIN_DATUM_SIGNER:
+		break;
+        case DAP_CHAIN_DATUM_CUSTOM:
+        break;
+        default:
+            return ATOM_REJECT;
     }
 
     dap_chain_gdb_datum_hash_item_t * l_hash_item = DAP_NEW_Z(dap_chain_gdb_datum_hash_item_t);
@@ -371,8 +375,7 @@ static dap_chain_atom_verify_res_t s_chain_callback_atom_add(dap_chain_t * a_cha
     dap_hash_fast(l_datum->data,l_datum->header.data_size,&l_hash_item->datum_data_hash );
     dap_chain_hash_fast_to_str(&l_hash_item->datum_data_hash,l_hash_item->key,sizeof(l_hash_item->key)-1);
     if (!l_gdb_priv->is_load_mode) {
-        dap_chain_global_db_gr_set(dap_strdup(l_hash_item->key), DAP_DUP_SIZE(l_datum, l_datum_size),
-                                   l_datum_size, l_gdb_priv->group_datums);
+	dap_chain_global_db_gr_set(l_hash_item->key, l_datum, l_datum_size, l_gdb_priv->group_datums);
     } else
         log_it(L_DEBUG,"Load mode, doesn't save item %s:%s", l_hash_item->key, l_gdb_priv->group_datums);
 
@@ -416,21 +419,22 @@ static size_t s_chain_callback_atom_get_static_hdr_size()
  * @param a_chain dap_chain_t a_chain
  * @return dap_chain_atom_iter_t* 
  */
-static dap_chain_atom_iter_t* s_chain_callback_atom_iter_create(dap_chain_t * a_chain)
+static dap_chain_atom_iter_t* s_chain_callback_atom_iter_create(dap_chain_t * a_chain, dap_chain_cell_id_t a_cell_id, bool a_with_treshold)
 {
     dap_chain_atom_iter_t * l_iter = DAP_NEW_Z(dap_chain_atom_iter_t);
     l_iter->chain = a_chain;
-    l_iter->cur_hash = DAP_NEW(dap_chain_hash_fast_t);
+    l_iter->cell_id = a_cell_id;
+    l_iter->with_treshold = a_with_treshold;
     return l_iter;
 }
 
 /**
  * @brief create atom object (dap_chain_atom_iter_t)
- * 
+ *
  * @param a_chain chain object
  * @param a_atom pointer to atom
  * @param a_atom_size size of atom
- * @return dap_chain_atom_iter_t* 
+ * @return dap_chain_atom_iter_t*
  */
 static dap_chain_atom_iter_t* s_chain_callback_atom_iter_create_from(dap_chain_t * a_chain,
         dap_chain_atom_ptr_t a_atom, size_t a_atom_size)
@@ -460,11 +464,11 @@ static void s_chain_callback_atom_iter_delete(dap_chain_atom_iter_t * a_atom_ite
 
 /**
  * @brief get dap_chain_atom_ptr_t object form database by hash
- * @details Searchs by datum data hash, not for datum's hash itself 
- * @param a_atom_iter dap_chain_atom_iter_t atom object 
+ * @details Searchs by datum data hash, not for datum's hash itself
+ * @param a_atom_iter dap_chain_atom_iter_t atom object
  * @param a_atom_hash dap_chain_hash_fast_t atom hash
  * @param a_atom_size size of atom object
- * @return dap_chain_atom_ptr_t 
+ * @return dap_chain_atom_ptr_t
  */
 static dap_chain_atom_ptr_t s_chain_callback_atom_iter_find_by_hash(dap_chain_atom_iter_t * a_atom_iter,
         dap_chain_hash_fast_t * a_atom_hash, size_t *a_atom_size)
@@ -481,10 +485,10 @@ static dap_chain_atom_ptr_t s_chain_callback_atom_iter_find_by_hash(dap_chain_at
 
 /**
  * @brief Get the first dag event from database
- * 
- * @param a_atom_iter ap_chain_atom_iter_t object 
+ *
+ * @param a_atom_iter ap_chain_atom_iter_t object
  * @param a_atom_size a_atom_size atom size
- * @return dap_chain_atom_ptr_t 
+ * @return dap_chain_atom_ptr_t
  */
 static dap_chain_atom_ptr_t s_chain_callback_atom_iter_get_first(dap_chain_atom_iter_t * a_atom_iter, size_t *a_atom_size)
 {
@@ -501,10 +505,12 @@ static dap_chain_atom_ptr_t s_chain_callback_atom_iter_get_first(dap_chain_atom_
             DAP_DELETE( a_atom_iter->cur);
         a_atom_iter->cur = l_datum;
         a_atom_iter->cur_size = l_datum_size;
+        a_atom_iter->cur_hash = DAP_NEW_Z(dap_hash_fast_t);
         dap_chain_hash_fast_from_str(l_item->key, a_atom_iter->cur_hash);
         if (a_atom_size)
             *a_atom_size = l_datum_size;
     } else {
+        DAP_DEL_Z(a_atom_iter->cur_hash);
         DAP_DEL_Z(a_atom_iter->cur);
         a_atom_iter->cur_size = 0;
         if (a_atom_size)
@@ -516,10 +522,10 @@ static dap_chain_atom_ptr_t s_chain_callback_atom_iter_get_first(dap_chain_atom_
 
 /**
  * @brief Get the next dag event from database
- * 
+ *
  * @param a_atom_iter dap_chain_atom_iter_t
  * @param a_atom_size size_t a_atom_size
- * @return dap_chain_atom_ptr_t 
+ * @return dap_chain_atom_ptr_t
  */
 static dap_chain_atom_ptr_t s_chain_callback_atom_iter_get_next(dap_chain_atom_iter_t *a_atom_iter, size_t *a_atom_size)
 {
@@ -540,6 +546,7 @@ static dap_chain_atom_ptr_t s_chain_callback_atom_iter_get_next(dap_chain_atom_i
         if (a_atom_size)
             *a_atom_size = l_datum_size;
     } else {
+        DAP_DEL_Z(a_atom_iter->cur_hash);
         DAP_DEL_Z(a_atom_iter->cur);
         a_atom_iter->cur_size = 0;
         if (a_atom_size)
@@ -596,7 +603,7 @@ static dap_chain_datum_t **s_chain_callback_atom_get_datum(dap_chain_atom_ptr_t 
     if (a_atom){
         dap_chain_datum_t * l_datum = a_atom;
         if (l_datum){
-            dap_chain_datum_t **l_datums = DAP_NEW_SIZE(dap_chain_datum_t *, sizeof(dap_chain_datum_t *));
+            dap_chain_datum_t **l_datums = DAP_NEW(dap_chain_datum_t *);
             if (a_datums_count)
                 *a_datums_count = 1;
             l_datums[0] = l_datum;

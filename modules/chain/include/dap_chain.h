@@ -26,15 +26,15 @@
 #pragma once
 #include <stdbool.h>
 #include <pthread.h>
+#include "dap_chain_global_db.h"
 #include "dap_config.h"
 #include "dap_chain_common.h"
-
 #include "dap_chain_datum.h"
 #include "dap_chain_datum_tx.h"
-struct dap_chain;
+
+
 typedef struct dap_chain dap_chain_t;
 
-struct dap_chain_cell;
 typedef struct dap_chain_cell dap_chain_cell_t;
 
 typedef struct dap_ledger dap_ledger_t;
@@ -47,10 +47,14 @@ typedef struct dap_chain_atom_iter{
     dap_chain_t * chain;
     dap_chain_atom_ptr_t cur;
     dap_chain_hash_fast_t *cur_hash;
+    dap_chain_cell_id_t cell_id;
+    bool with_treshold;
+    bool found_in_treshold;
     size_t cur_size;
     void * cur_item;
     void * _inheritor;
 } dap_chain_atom_iter_t;
+
 
 typedef enum dap_chain_atom_verify_res{
     ATOM_ACCEPT=0,
@@ -70,12 +74,12 @@ typedef dap_chain_atom_ptr_t (*dap_chain_callback_atom_form_treshold_t)(dap_chai
 typedef dap_chain_atom_verify_res_t (*dap_chain_callback_atom_verify_t)(dap_chain_t *, dap_chain_atom_ptr_t , size_t);
 typedef size_t (*dap_chain_callback_atom_get_hdr_size_t)(void);
 
-typedef dap_chain_atom_iter_t* (*dap_chain_callback_atom_iter_create_t)(dap_chain_t * );
+typedef dap_chain_atom_iter_t* (*dap_chain_callback_atom_iter_create_t)(dap_chain_t *, dap_chain_cell_id_t, bool);
 typedef dap_chain_atom_iter_t* (*dap_chain_callback_atom_iter_create_from_t)(dap_chain_t * ,dap_chain_atom_ptr_t, size_t);
 typedef dap_chain_atom_ptr_t (*dap_chain_callback_atom_iter_get_first_t)(dap_chain_atom_iter_t * , size_t*);
 typedef dap_chain_datum_t** (*dap_chain_callback_atom_get_datum_t)(dap_chain_atom_ptr_t, size_t, size_t * );
 typedef dap_chain_atom_ptr_t (*dap_chain_callback_atom_iter_find_by_hash_t)(dap_chain_atom_iter_t * ,dap_chain_hash_fast_t *,size_t*);
-typedef dap_chain_datum_tx_t* (*dap_chain_callback_tx_find_by_hash_t)(dap_chain_t *, dap_chain_hash_fast_t *);
+typedef dap_chain_datum_tx_t* (*dap_chain_callback_tx_find_by_hash_t)(dap_chain_t * ,dap_chain_hash_fast_t *);
 
 typedef dap_chain_atom_ptr_t * (*dap_chain_callback_atom_iter_get_atoms_t)(dap_chain_atom_iter_t * ,size_t* ,size_t**);
 
@@ -87,13 +91,17 @@ typedef size_t (*dap_chain_callback_add_datums_with_group_t)(dap_chain_t * , dap
 
 typedef void (*dap_chain_callback_notify_t)(void * a_arg, dap_chain_t *a_chain, dap_chain_cell_id_t a_id, void* a_atom, size_t a_atom_size); //change in chain happened
 
-typedef  enum dap_chain_type
+typedef size_t(*dap_chain_callback_get_count_tx)(dap_chain_t *a_chain);
+typedef dap_list_t *(*dap_chain_callback_get_txs)(dap_chain_t *a_chain, size_t a_count, size_t a_page);
+
+typedef enum dap_chain_type
 {
     CHAIN_TYPE_FIRST,
     CHAIN_TYPE_TOKEN,
     CHAIN_TYPE_EMISSION,
     CHAIN_TYPE_TX,
     CHAIN_TYPE_CA,
+    CHAIN_TYPE_SIGNER,
     CHAIN_TYPE_LAST
 } dap_chain_type_t;
 
@@ -146,6 +154,9 @@ typedef struct dap_chain{
     dap_chain_callback_atom_iter_get_atoms_t callback_atom_iter_get_lasts;
     dap_chain_callback_atom_iter_delete_t callback_atom_iter_delete;
 
+    dap_chain_callback_get_count_tx callback_count_tx;
+    dap_chain_callback_get_txs callback_get_txs;
+
     dap_chain_callback_notify_t callback_notify;
     void *callback_notify_arg;
 
@@ -158,6 +169,11 @@ typedef struct dap_chain{
     void * _pvt; // private data
     void * _inheritor; // inheritor object
 } dap_chain_t;
+
+typedef struct dap_chain_gdb_notifier {
+    dap_global_db_obj_callback_notify_t callback;
+    void *cb_arg;
+} dap_chain_gdb_notifier_t;
 
 #define DAP_CHAIN(a) ( (dap_chain_t *) (a)->_inheritor)
 
@@ -183,5 +199,6 @@ dap_chain_t * dap_chain_load_from_cfg(dap_ledger_t* a_ledger,const char * a_chai
 void dap_chain_delete(dap_chain_t * a_chain);
 void dap_chain_add_callback_notify(dap_chain_t * a_chain, dap_chain_callback_notify_t a_callback, void * a_arg);
 dap_chain_atom_ptr_t dap_chain_get_atom_by_hash(dap_chain_t * a_chain, dap_chain_hash_fast_t * a_atom_hash, size_t * a_atom_size);
-bool dap_chain_get_atom_last_hash(dap_chain_t * a_chain, dap_hash_fast_t * a_atom_hash);
+bool dap_chain_get_atom_last_hash(dap_chain_t *a_chain, dap_hash_fast_t *a_atom_hash, dap_chain_cell_id_t a_cel_id);
 ssize_t dap_chain_atom_save(dap_chain_t *a_chain, const uint8_t *a_atom, size_t a_atom_size, dap_chain_cell_id_t a_cell_id);
+void dap_chain_add_mempool_notify_callback(dap_chain_t *a_chain, dap_global_db_obj_callback_notify_t a_callback, void *a_cb_arg);

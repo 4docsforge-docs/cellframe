@@ -64,9 +64,9 @@ int dap_notify_server_init()
     uint16_t l_notify_socket_port = dap_config_get_item_uint16_default(g_config, "notify_server", "listen_port",0);
 
     if(l_notify_socket_path){
-        s_notify_server = dap_server_new_local(dap_events_get_default(),l_notify_socket_path,l_notify_socket_path_mode , NULL);
+        s_notify_server = dap_server_new_local(dap_events_get_default(), l_notify_socket_path, l_notify_socket_path_mode, NULL);
     }else if (l_notify_socket_address && l_notify_socket_port ){
-        s_notify_server = dap_server_new(dap_events_get_default(),l_notify_socket_address,
+        s_notify_server = dap_server_new(dap_events_get_default(), l_notify_socket_address,
                                             l_notify_socket_port, SERVER_TCP, NULL);
     }else{
         log_it(L_INFO,"Notify server is not configured, nothing to init but thats okay");
@@ -137,6 +137,19 @@ int dap_notify_server_send_f_inter(uint32_t a_worker_id, const char * a_format,.
  * @param a_format
  * @return
  */
+int dap_notify_server_send_mt(const char *a_data)
+{
+    if(!s_notify_server_queue) // If not initialized - nothing to notify
+        return 0;
+    return dap_events_socket_queue_ptr_send(s_notify_server_queue, dap_strdup(a_data));
+}
+
+
+/**
+ * @brief dap_notify_server_send_fmt_mt
+ * @param a_format
+ * @return
+ */
 int dap_notify_server_send_f_mt(const char * a_format,...)
 {
     if(!s_notify_server_queue) // If not initialized - nothing to notify
@@ -169,7 +182,7 @@ static void s_notify_server_callback_queue(dap_events_socket_t * a_es, void * a_
         }
         size_t l_str_len = a_arg? strlen((char*)a_arg): 0;
         if(l_str_len){
-            dap_events_socket_write_mt(l_socket_handler->esocket->worker, //) inter(a_es->worker->queue_es_io_input[l_worker_id],
+            dap_events_socket_write_mt(l_socket_handler->esocket->worker, //_inter(a_es->worker->queue_es_io_input[l_worker_id],
                                           l_socket_handler->uuid,
                                           a_arg, l_str_len + 1);
         }

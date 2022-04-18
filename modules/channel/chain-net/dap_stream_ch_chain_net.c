@@ -90,6 +90,7 @@ static void session_data_del(unsigned int a_id)
     pthread_mutex_lock(&s_hash_mutex);
     HASH_FIND_INT(s_chain_net_data, &a_id, l_sdata);
     if(l_sdata) {
+        // Clang bug at this, l_sdata should change at every loop cycle
         HASH_DEL(s_chain_net_data, l_sdata);
         DAP_DELETE(l_sdata);
     }
@@ -299,7 +300,7 @@ void s_stream_ch_packet_in(dap_stream_ch_t* a_ch, void* a_arg)
                                                           l_err_str,sizeof (l_err_str));
                         dap_stream_ch_set_ready_to_write_unsafe(a_ch, true);
                     } else {
-                        dap_chain_node_addr_t *l_addr_new = dap_chain_node_gen_addr(l_net, &l_net->pub.cell_id );
+                        dap_chain_node_addr_t *l_addr_new = dap_chain_node_gen_addr(l_net->pub.id);
                         dap_stream_ch_chain_net_pkt_write(a_ch, DAP_STREAM_CH_CHAIN_NET_PKT_TYPE_NODE_ADDR_LEASE ,
                                                          l_ch_chain_net_pkt->hdr.net_id, l_addr_new, sizeof (*l_addr_new));
                         dap_stream_ch_set_ready_to_write_unsafe(a_ch, true);

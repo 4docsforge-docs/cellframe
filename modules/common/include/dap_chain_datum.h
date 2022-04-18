@@ -27,13 +27,14 @@
 #include "dap_common.h"
 #include "dap_math_ops.h"
 #include "dap_chain_common.h"
+#include "dap_chain_datum_tx.h"
 
 #define DAP_CHAIN_DATUM_VERSION 0x00
 
 /// End section, means all the rest of the block is empty
-#define DAP_CHAIN_DATUM_BLOCK_END                 0x0000
+#define DAP_CHAIN_DATUM_BLOCK_END           0x0000
 /// Section with additional roots, for example transaction roots
-#define DAP_CHAIN_DATUM_BLOCK_ROOTS 0x0001
+#define DAP_CHAIN_DATUM_BLOCK_ROOTS         0x0001
 
 /// Transaction header section
 #define DAP_CHAIN_DATUM_TX                  0x0100
@@ -54,6 +55,7 @@
 
 /// CA with public key and self signed metadata
 #define DAP_CHAIN_DATUM_CA                  0x0c00
+#define DAP_CHAIN_DATUM_SIGNER              0x0c01
 
 /// Token
 /// Simple token decl
@@ -79,6 +81,8 @@
             s = "DATUM_EVM_DATA"; break;    \
         case DAP_CHAIN_DATUM_CA:            \
             s = "DATUM_CA"; break;          \
+	case DAP_CHAIN_DATUM_SIGNER:        \
+            s = "DATUM_SIGNER"; break;      \
         case DAP_CHAIN_DATUM_CUSTOM:        \
             s = "DATUM_CUSTOM"; break;      \
         case DAP_CHAIN_DATUM_TOKEN_DECL:    \
@@ -138,9 +142,9 @@ typedef void (*dap_chain_datum_callback_iter_delete_t)(dap_chain_datum_iter_t * 
  * @param a_datum
  * @return
  */
-static inline size_t dap_chain_datum_size(dap_chain_datum_t * a_datum)
+static inline size_t dap_chain_datum_size(const dap_chain_datum_t *a_datum)
 {
-    if(!a_datum)
+    if (!a_datum)
         return 0;
     return  sizeof(a_datum->header) + a_datum->header.data_size;
 }
@@ -154,3 +158,10 @@ static inline const char *dap_chain_datum_type_id_to_str(uint16_t a_type_id)
     DAP_DATUM_TYPE_STR(a_type_id,l_ret);
     return l_ret;
 }
+
+void dap_chain_datum_dump(dap_string_t *a_str_out, dap_chain_datum_t *a_datum, const char *a_hash_out_type);
+bool dap_chain_datum_dump_tx(dap_chain_datum_tx_t *a_datum,
+                             const char *a_ticker,
+                             dap_string_t *a_str_out,
+                             const char *a_hash_out_type,
+                             dap_hash_fast_t *a_tx_hash);

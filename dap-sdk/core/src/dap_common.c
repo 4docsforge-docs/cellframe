@@ -72,6 +72,23 @@
 
 #define LOG_TAG "dap_common"
 
+
+#ifndef DAP_GLOBAL_IS_INT128
+const uint128_t uint128_0 = {};
+const uint128_t uint128_1 = {.hi = 0, .lo = 1};
+#else // DAP_GLOBAL_IS_INT128
+const uint128_t uint128_0 = 0;
+const uint128_t uint128_1 = 1;
+#endif // DAP_GLOBAL_IS_INT128
+
+const uint256_t uint256_0 = {};
+#ifndef DAP_GLOBAL_IS_INT128
+const uint256_t uint256_1 = {.hi = uint128_0, .lo = uint128_1};
+#else // DAP_GLOBAL_IS_INT128
+const uint256_t uint256_1 = {.hi = 0, .lo = 1};
+#endif // DAP_GLOBAL_IS_INT128
+const uint512_t uint512_0 = {};
+
 static const char *s_log_level_tag[ 16 ] = {
     " [DBG] ", // L_DEBUG     = 0
     " [INF] ", // L_INFO      = 1,
@@ -156,8 +173,10 @@ static volatile int s_log_count = 0;
 static pthread_t s_log_thread = 0;
 static void  *s_log_thread_proc(void *arg);
 
+#define STR_LOG_BUF_MAX                       1000
+
 typedef struct log_str_t {
-    char str[1000];
+    char str[STR_LOG_BUF_MAX];
     unsigned int offset;
     struct log_str_t *prev, *next;
 } log_str_t;
@@ -363,6 +382,29 @@ void _log_it(const char *a_log_tag, enum dap_log_level a_ll, const char *a_fmt, 
     pthread_mutex_unlock(&s_log_mutex);
 }
 
+static int s_check_and_fill_buffer_log(char **m, struct tm *a_tm_st, char *a_tmp)
+{
+	char *s = *m;
+	struct tm l_tm;
+	if (sscanf(a_tmp, "[%d/%d/%d-%d:%d:%d]", &l_tm.tm_mon, &l_tm.tm_mday, &l_tm.tm_year, &l_tm.tm_hour, &l_tm.tm_min, &l_tm.tm_sec) == 6) {
+		l_tm.tm_mon--;
+		if (a_tm_st->tm_year >= l_tm.tm_year &&
+			a_tm_st->tm_mon >= l_tm.tm_mon &&
+			a_tm_st->tm_mday >= l_tm.tm_mday &&
+			a_tm_st->tm_hour >= l_tm.tm_hour &&
+			a_tm_st->tm_min >= l_tm.tm_min &&
+			a_tm_st->tm_sec >= l_tm.tm_sec) {
+			size_t l_len = strlen(a_tmp);
+            memcpy(s, a_tmp, l_len);
+            s[l_len] = '\0';
+			s += l_len;
+			//*s++ = '\n';
+			*m = s;
+			return 1;
+		}
+	}
+	return 0;
+}
 /**
  * @brief dap_log_get_item
  * @param a_start_time
@@ -371,9 +413,47 @@ void _log_it(const char *a_log_tag, enum dap_log_level a_ll, const char *a_fmt, 
  */
 char *dap_log_get_item(time_t a_start_time, int a_limit)
 {
+#if 0
     UNUSED(a_start_time);
     UNUSED(a_limit);
-    return NULL; // TODO
+#endif
+
+	log_str_t *elem, *tmp;
+	elem = tmp = NULL;
+	char *l_buf = DAP_CALLOC(STR_LOG_BUF_MAX, a_limit);
+	char *l_line = DAP_CALLOC(1, STR_LOG_BUF_MAX + 1);
+	char *s = l_buf;
+
+	//char *l_log_file = dap_strdup_printf("%s/var/log/%s.log", g_sys_dir_path, dap_get_appname());
+	char *l_log_file = dap_strdup_printf("%s", s_log_file_path);
+	FILE *fp = fopen(l_log_file, "r");
+	if (!fp) {
+		DAP_FREE(l_buf);
+		DAP_FREE(l_line);
+		return NULL;
+	}
+
+	struct tm *l_tm_st = localtime (&a_start_time);
+
+	pthread_mutex_lock(&s_log_mutex);
+
+	while (fgets(l_line, STR_LOG_BUF_MAX, fp)) {
+		if (a_limit <= 0) break;
+		a_limit -= s_check_and_fill_buffer_log(&s, l_tm_st, l_line);
+	}
+
+    DL_FOREACH_SAFE(s_log_buffer, elem, tmp) {
+        if (!tmp->str[0]) continue;
+		if (a_limit <= 0) break;
+		a_limit -= s_check_and_fill_buffer_log(&s, l_tm_st, tmp->str);
+	}
+
+	pthread_mutex_unlock(&s_log_mutex);
+
+	fclose(fp);
+	DAP_FREE(l_line);
+
+    return l_buf;
 }
 
 /**
@@ -1103,3 +1183,83 @@ char* dap_ctime_r(time_t *a_time, char* a_buf){
     }
 }
 
+int dap_is_alpha_and_(char e)
+{
+    if ((e >= '0' && e <= '9')||(e >= 'a' && e <= 'z')||(e >= 'A' && e <= 'Z')||(e == '_')) return 1;
+    return 0;
+}
+
+int dap_is_alpha(char e)
+{
+    if ((e >= '0' && e <= '9')||(e >= 'a' && e <= 'z')||(e >= 'A' && e <= 'Z')) return 1;
+    return 0;
+}
+int dap_is_digit(char e)
+{
+    if ((e >= '0' && e <= '9')) return 1;
+    return 0;
+}
+char **dap_parse_items(const char *a_str, char a_delimiter, int *a_count, const int a_only_digit)
+{
+    int l_count_temp = *a_count = 0;
+    int l_len_str = strlen(a_str);
+    if (l_len_str == 0) return NULL;
+    char *s, *l_temp_str;
+    s = l_temp_str = dap_strdup(a_str);
+
+    int l_buf = 0;
+    for (int i = 0; i < l_len_str; i++) {
+        if (s[i] == a_delimiter && !l_buf) {
+            s[i] = 0;
+            continue;
+        }
+        if (s[i] == a_delimiter && l_buf) {
+            s[i] = 0;
+            l_buf = 0;
+            continue;
+        }
+        if (!dap_is_alpha(s[i]) && l_buf) {
+            s[i] = 0;
+            l_buf = 0;
+            continue;
+        }
+        if (!dap_is_alpha(s[i]) && !l_buf) {
+            s[i] = 0;
+            continue;
+        }
+        if (a_only_digit) {
+            if (dap_is_digit(s[i])) {
+                l_buf++;
+                if (l_buf == 1) l_count_temp++;
+                continue;
+            }
+        } else if (dap_is_alpha(s[i])) {
+            l_buf++;
+            if (l_buf == 1) l_count_temp++;
+            continue;
+        }
+        if (!dap_is_alpha(s[i])) {
+            l_buf = 0;
+            s[i] = 0;
+            continue;
+        }
+    }
+
+    s = l_temp_str;
+    if (l_count_temp == 0) {
+        free (l_temp_str);
+        return NULL;
+    }
+
+    char **lines = DAP_CALLOC(l_count_temp, sizeof (void *));
+    for (int i = 0; i < l_count_temp; i++) {
+        while (*s == 0) s++;
+        lines[i] = strdup(s);
+        s = strchr(s, '\0');
+        s++;
+    }
+
+    free (l_temp_str);
+    *a_count = l_count_temp;
+    return lines;
+}

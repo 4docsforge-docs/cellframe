@@ -25,7 +25,6 @@
 
 #pragma once
 
-#include "dap_stream_ch.h"
 #include "dap_chain_common.h"
 
 int dap_stream_ch_chain_net_srv_init(void);

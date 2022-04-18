@@ -28,12 +28,16 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <uthash.h>
+#include <pthread.h>
+#include <errno.h>
+#include <stdatomic.h>
+
 #define _GNU_SOURCE
 
+#include "dap_chain_global_db_driver_cdb.h"
 #include "dap_common.h"
 #include "dap_hash.h"
 #include "dap_strfuncs.h" // #include <dap_fnmatch.h>
-#include "dap_chain_global_db_driver_cdb.h"
 #include "dap_file_utils.h"
 
 #define LOG_TAG "dap_chain_global_db_cdb"
@@ -55,7 +59,8 @@ typedef struct _cdb_instance {
 } cdb_instance, *pcdb_instance;
 
 /** A path to a CDB file. */
-static char *s_cdb_path = NULL;
+static char s_cdb_path[MAX_PATH];
+
 /** A pointer to a CDB instance. */
 static pcdb_instance s_cdb = NULL;
 /** A mutex for working with a CDB instanse. */
@@ -86,7 +91,7 @@ static void cdb_serialize_val_to_dap_store_obj(pdap_store_obj_t a_obj, const cha
     a_obj->value_len = dap_hex_to_uint(val + offset, sizeof(uint64_t));
     offset += sizeof(uint64_t);
     a_obj->value = DAP_NEW_SIZE(uint8_t, a_obj->value_len);
-    memcpy(a_obj->value, val + offset, a_obj->value_len);
+    memcpy((byte_t *)a_obj->value, val + offset, a_obj->value_len);
     offset += a_obj->value_len;
     a_obj->timestamp = dap_hex_to_uint(val + offset, sizeof(uint64_t));
 }
@@ -159,29 +164,35 @@ bool dap_cdb_get_count_iter_callback(void *arg, const char *key, int ksize, cons
     return true;
 }
 
-/** 
+/**
  * @brief Initiates a CDB with main hash table size: 1000000,
  * record cache: 128Mb, index page cache: 1024Mb.
- * @param a_group a group name 
- * @param a_flags should be combination of CDB_CREAT / CDB_TRUNC / CDB_PAGEWARMUP 
+ * @param a_group a group name
+ * @param a_flags should be combination of CDB_CREAT / CDB_TRUNC / CDB_PAGEWARMUP
    CDB_PAGEWARMUP
  * @return A pointer to CDB, if success. NULL, if error.
  */
-pcdb_instance dap_cdb_init_group(char *a_group, int a_flags) {
+pcdb_instance dap_cdb_init_group(const char *a_group, int a_flags) {
     pcdb_instance l_cdb_i = NULL;
+    char l_cdb_path[MAX_PATH + 2];
+
     pthread_mutex_lock(&cdb_mutex);
-    char l_cdb_path[strlen(s_cdb_path) + strlen(a_group) + 2];
     HASH_FIND_STR(s_cdb, a_group, l_cdb_i);
+    if (a_flags & CDB_TRUNC) {
+        if (!l_cdb_i)
+            goto FIN;
+        cdb_close(l_cdb_i->cdb);
+    }
     if (!(a_flags & CDB_TRUNC)) {
         if (l_cdb_i)
             goto FIN;
         l_cdb_i = DAP_NEW(cdb_instance);
+        l_cdb_i->local_group = dap_strdup(a_group);
+        l_cdb_i->cdb = cdb_new();
     }
-    l_cdb_i->local_group = dap_strdup(a_group);
-    l_cdb_i->cdb = cdb_new();
     memset(l_cdb_path, '\0', sizeof(l_cdb_path));
     dap_snprintf(l_cdb_path, sizeof(l_cdb_path), "%s/%s", s_cdb_path, a_group);
-    cdb_options l_opts = { 1000000, 128, 1024 };
+    cdb_options l_opts = { 4096, 128, 1024 };
     if (cdb_option(l_cdb_i->cdb, l_opts.hsize, l_opts.pcacheMB, l_opts.rcacheMB) != CDB_SUCCESS) {
         log_it(L_ERROR, "Options are inacceptable: \"%s\"", cdb_errmsg(cdb_errno(l_cdb_i->cdb)));
         goto ERR;
@@ -208,13 +219,16 @@ pcdb_instance dap_cdb_init_group(char *a_group, int a_flags) {
             //log_it(L_INFO, "Last id: %-24u"                 , l_cdb_i->id);
             DAP_DELETE(l_arg.o);
         } else {
-            log_it(L_INFO, "Group \"%s\" created"           , l_cdb_i->local_group);
+            log_it(L_INFO, "Group \"%s\" created", l_cdb_i->local_group);
             l_cdb_i->id = 0;
         }
         HASH_ADD_KEYPTR(hh, s_cdb, l_cdb_i->local_group, strlen(l_cdb_i->local_group), l_cdb_i);
     } else {
-        log_it(L_INFO, "Group \"%s\" truncated"             , l_cdb_i->local_group);
-        l_cdb_i->id = 0;
+        log_it(L_INFO, "Group \"%s\" truncated", l_cdb_i->local_group);
+        DAP_DELETE(l_cdb_i->local_group);
+        cdb_destroy(l_cdb_i->cdb);
+        HASH_DEL(s_cdb, l_cdb_i);
+        DAP_DEL_Z(l_cdb_i);
     }
 
 FIN:
@@ -232,21 +246,27 @@ ERR:
  * @brief Initiates a CDB with callback fuctions.
  * @param a_cdb_path a path to CDB. Saved in s_cdb_path
  * @param a_drv_callback a struct for callback functions
+ * @param a_db_drvmode_async
  * @return 0 if success, -1 if сouldn't open db directory, -2 if dap_cdb_init_group() returns NULL.
  */
-int dap_db_driver_cdb_init(const char *a_cdb_path, dap_db_driver_callbacks_t *a_drv_callback) {
-    s_cdb_path = dap_strdup(a_cdb_path);
-    if(s_cdb_path[strlen(s_cdb_path)] == '/') {
-        s_cdb_path[strlen(s_cdb_path)] = '\0';
-    }
+int dap_db_driver_cdb_init(const char *a_cdb_path, dap_db_driver_callbacks_t *a_drv_callback)
+{
+int l_rc;
+struct dirent *d;
+DIR *dir;
+
+    for (l_rc = 0; *a_cdb_path && ((size_t)l_rc < sizeof(s_cdb_path)); )
+         s_cdb_path[l_rc++] = *(a_cdb_path++);                              /* Copy path to CDB root to local storage, calculate length */
+
+    if(s_cdb_path[l_rc - 1] == '/')                                         /* Truncate terminal '/' if need */
+        s_cdb_path[--l_rc] = '\0';
+
     dap_mkdir_with_parents(s_cdb_path);
-    struct dirent *d;
-    DIR *dir = opendir(s_cdb_path);
-    if (!dir) {
-        log_it(L_ERROR, "Couldn't open db directory");
-        return -1;
-    }
-    for (d = readdir(dir); d; d = readdir(dir)) {
+
+    if ( !(dir = opendir(s_cdb_path)) )
+        return log_it(L_ERROR, "Couldn't open db directory '%s', errno=%d", s_cdb_path, errno), -errno;
+
+    while ( (d = readdir(dir))) {
 #ifdef _DIRENT_HAVE_D_TYPE
         if (d->d_type != DT_DIR)
             continue;
@@ -256,16 +276,16 @@ int dap_db_driver_cdb_init(const char *a_cdb_path, dap_db_driver_callbacks_t *a_
         if (!S_ISDIR(buf.st_mode) || !res) {
             continue;
         }
-#elif defined (DAP_OS_BSD)        
+#elif defined (DAP_OS_BSD)
         struct stat buf;
         int res = stat(d->d_name, &buf);
         if (!S_ISDIR(buf.st_mode) || !res) {
             continue;
         }
 #endif
-        if (!dap_strcmp(d->d_name, ".") || !dap_strcmp(d->d_name, "..")) {
+        if ( (d->d_name[0] == '.') || !dap_strcmp(d->d_name, ".."))
             continue;
-        }
+
         pcdb_instance l_cdb_i = dap_cdb_init_group(d->d_name, CDB_PAGEWARMUP);
         if (!l_cdb_i) {
             dap_db_driver_cdb_deinit();
@@ -273,6 +293,7 @@ int dap_db_driver_cdb_init(const char *a_cdb_path, dap_db_driver_callbacks_t *a_
             return -2;
         }
     }
+
     a_drv_callback->read_last_store_obj = dap_db_driver_cdb_read_last_store_obj;
     a_drv_callback->apply_store_obj     = dap_db_driver_cdb_apply_store_obj;
     a_drv_callback->read_store_obj      = dap_db_driver_cdb_read_store_obj;
@@ -284,6 +305,7 @@ int dap_db_driver_cdb_init(const char *a_cdb_path, dap_db_driver_callbacks_t *a_
     a_drv_callback->flush               = dap_db_driver_cdb_flush;
 
     closedir(dir);
+
     return CDB_SUCCESS;
 }
 
@@ -291,7 +313,7 @@ int dap_db_driver_cdb_init(const char *a_cdb_path, dap_db_driver_callbacks_t *a_
  * @brief Gets CDB by a_group.
  * @param a_group a group name
  * @return if CDB is found, a pointer to CDB, otherwise NULL.
- */ 
+ */
 pcdb_instance dap_cdb_get_db_by_group(const char *a_group) {
     pcdb_instance l_cdb_i = NULL;
     pthread_rwlock_rdlock(&cdb_rwlock);
@@ -306,7 +328,7 @@ pcdb_instance dap_cdb_get_db_by_group(const char *a_group) {
  * @return 0
  */
 int dap_cdb_add_group(const char *a_group) {
-    char l_cdb_path[strlen(s_cdb_path) + strlen(a_group) + 2];
+    char l_cdb_path[MAX_PATH + 2];
     memset(l_cdb_path, '\0', sizeof(l_cdb_path));
     dap_snprintf(l_cdb_path, sizeof(l_cdb_path), "%s/%s", s_cdb_path, a_group);
 #ifdef _WIN32
@@ -331,7 +353,7 @@ int dap_db_driver_cdb_deinit() {
         DAP_DELETE(cur_cdb);
     }
     pthread_rwlock_unlock(&cdb_rwlock);
-    DAP_DEL_Z(s_cdb_path)
+
     return CDB_SUCCESS;
 }
 
@@ -356,7 +378,7 @@ int dap_db_driver_cdb_flush(void) {
  * @brief Read last store item from CDB.
  * @param a_group a group name
  * @return If successful, a pointer to item, otherwise NULL.
- */  
+ */
 dap_store_obj_t *dap_db_driver_cdb_read_last_store_obj(const char* a_group) {
     if (!a_group) {
         return NULL;
@@ -383,7 +405,7 @@ dap_store_obj_t *dap_db_driver_cdb_read_last_store_obj(const char* a_group) {
  * @param a_group the group name
  * @param a_key the key
  * @return true or false
- */  
+ */
 bool dap_db_driver_cdb_is_obj(const char *a_group, const char *a_key)
 {
     bool l_ret = false;
@@ -409,7 +431,7 @@ bool dap_db_driver_cdb_is_obj(const char *a_group, const char *a_key)
  * @param a_key the key or NULL
  * @param a_count_out IN. Count of read items. OUT Count of items was read
  * @return If successful, pointer to items; otherwise NULL.
- */  
+ */
 dap_store_obj_t *dap_db_driver_cdb_read_store_obj(const char *a_group, const char *a_key, size_t *a_count_out) {
     if (!a_group) {
         return NULL;
@@ -469,7 +491,7 @@ dap_store_obj_t *dap_db_driver_cdb_read_store_obj(const char *a_group, const cha
  * @param a_count_out[in] a count of items
  * @param a_count[out] a count of items were got
  * @return If successful, pointer to items, otherwise NULL.
- */  
+ */
 dap_store_obj_t* dap_db_driver_cdb_read_cond_store_obj(const char *a_group, uint64_t a_id, size_t *a_count_out) {
     if (!a_group) {
         return NULL;
@@ -521,7 +543,7 @@ dap_store_obj_t* dap_db_driver_cdb_read_cond_store_obj(const char *a_group, uint
  * @param a_group the group name
  * @param a_id id
  * @return If successful, count of store items; otherwise 0.
- */  
+ */
 size_t dap_db_driver_cdb_read_count_store(const char *a_group, uint64_t a_id)
 {
     if (!a_group) {
@@ -582,12 +604,12 @@ int dap_db_driver_cdb_apply_store_obj(pdap_store_obj_t a_store_obj) {
     if (!l_cdb_i) {
         return -1;
     }
-    if(a_store_obj->type == 'a') {
+    if(a_store_obj->type == DAP_DB$K_OPTYPE_ADD) {
         if(!a_store_obj->key) {
             return -2;
         }
         cdb_record l_rec;
-        l_rec.key = a_store_obj->key; //dap_strdup(a_store_obj->key);
+        l_rec.key = (char *)a_store_obj->key; //dap_strdup(a_store_obj->key);
         int offset = 0;
         char *l_val = DAP_NEW_Z_SIZE(char, sizeof(uint64_t) + sizeof(uint64_t) + a_store_obj->value_len + sizeof(uint64_t));
         dap_uint_to_hex(l_val, ++l_cdb_i->id, sizeof(uint64_t));
@@ -596,7 +618,6 @@ int dap_db_driver_cdb_apply_store_obj(pdap_store_obj_t a_store_obj) {
         offset += sizeof(uint64_t);
         if(a_store_obj->value && a_store_obj->value_len){
             memcpy(l_val + offset, a_store_obj->value, a_store_obj->value_len);
-            DAP_DELETE(a_store_obj->value);
         }
         offset += a_store_obj->value_len;
         dap_uint_to_hex(l_val + offset, a_store_obj->timestamp, sizeof(uint64_t));
@@ -606,19 +627,14 @@ int dap_db_driver_cdb_apply_store_obj(pdap_store_obj_t a_store_obj) {
             log_it(L_ERROR, "Couldn't add record with key [%s] to CDB: \"%s\"", l_rec.key, cdb_errmsg(cdb_errno(l_cdb_i->cdb)));
             ret = -1;
         }
-        DAP_DELETE(l_rec.key);
+        cdb_flushalldpage(l_cdb_i->cdb);
         DAP_DELETE(l_rec.val);
-    } else if(a_store_obj->type == 'd') {
+    } else if(a_store_obj->type == DAP_DB$K_OPTYPE_DEL) {
         if(a_store_obj->key) {
             if(cdb_del(l_cdb_i->cdb, a_store_obj->key, (int) strlen(a_store_obj->key)) == -3)
                 ret = 1;
-            DAP_DELETE(a_store_obj->key);
-        } else {
-            cdb_destroy(l_cdb_i->cdb);
-            if (!dap_cdb_init_group(a_store_obj->group, CDB_TRUNC | CDB_PAGEWARMUP)) {
-                ret = -1;
-            }
-        }
+        } else if (dap_cdb_init_group(a_store_obj->group, CDB_TRUNC | CDB_PAGEWARMUP))
+            ret = -1;
     }
     return ret;
 }

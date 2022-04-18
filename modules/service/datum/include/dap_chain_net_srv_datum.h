@@ -22,5 +22,14 @@
     along with any DAP based project.  If not, see <http://www.gnu.org/licenses/>.
 */
 #pragma once
+
+#include "dap_common.h"
+#include "dap_chain_net.h"
+
+#define DAP_CHAIN_NET_SRV_DATUM_ID 0x5
+
 int dap_chain_net_srv_datum_init();
 void dap_chain_net_srv_datum_deinit();
+
+uint8_t * dap_chain_net_srv_file_datum_data_read(char * a_path, size_t *a_data_size);
+char* dap_chain_net_srv_datum_custom_add(dap_chain_t * a_chain, const uint8_t *a_data, size_t a_data_size);

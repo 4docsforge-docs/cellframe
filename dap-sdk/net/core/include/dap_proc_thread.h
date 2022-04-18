@@ -24,26 +24,25 @@
 #pragma once
 
 #include <pthread.h>
-#include "dap_common.h"
 #include "dap_proc_queue.h"
 #include "dap_worker.h"
+#include "dap_common.h"
 
 typedef struct dap_proc_thread{
-    uint32_t cpu_id;
-    pthread_t thread_id;
-    dap_proc_queue_t * proc_queue;
-    dap_events_socket_t * proc_event; // Should be armed if we have to deal with it
+    uint32_t    cpu_id;
+    pthread_t   thread_id;                              /* TID has been returned by pthread_create() */
 
-    dap_events_socket_t ** queue_assign_input; // Inputs for assign queues
-    dap_events_socket_t ** queue_io_input; // Inputs for assign queues
-    dap_events_socket_t ** queue_callback_input; // Inputs for worker context callback queues
-    atomic_uint proc_queue_size;
+    dap_proc_queue_t *proc_queue;                       /* Queues  */
+    atomic_uint proc_queue_size;                        /* Thread's load factor - is not supported at the moment  */
 
-    pthread_cond_t started_cond;
-    pthread_mutex_t started_mutex;
+    dap_events_socket_t * proc_event;                   // Should be armed if we have to deal with it
 
-    bool signal_kill;
-	bool signal_exit;
+    dap_events_socket_t ** queue_assign_input;          // Inputs for assign queues
+    dap_events_socket_t ** queue_io_input;              // Inputs for assign queues
+    dap_events_socket_t ** queue_callback_input;        // Inputs for worker context callback queues
+
+    int signal_kill;
+    int signal_exit;
 
     dap_events_socket_t * event_exit;
 
@@ -59,7 +58,7 @@ typedef struct dap_proc_thread{
 #elif defined (DAP_EVENTS_CAPS_KQUEUE)
     int kqueue_fd;
     struct kevent * kqueue_events;
-    int kqueue_events_count_max; 
+    int kqueue_events_count_max;
 #else
 #error "No poll for proc thread for your platform"
 #endif

@@ -21,7 +21,6 @@
     You should have received a copy of the GNU General Public License
     along with any DAP based project.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include <dap_chain_ledger.h>
 #include <sys/types.h>
 #include <dirent.h>
 #ifdef DAP_OS_LINUX
@@ -29,14 +28,15 @@
 #endif
 #include <unistd.h>
 
+#include "dap_chain_pvt.h"
 #include "dap_common.h"
 #include "dap_strfuncs.h"
 #include "dap_file_utils.h"
 #include "dap_config.h"
-#include "dap_chain_pvt.h"
 #include "dap_chain.h"
 #include "dap_chain_ledger.h"
 #include "dap_cert.h"
+#include "dap_chain_ledger.h"
 #include "dap_chain_cs.h"
 #include "dap_chain_vf.h"
 #include <uthash.h>
@@ -66,14 +66,10 @@ int s_prepare_env();
  */
 int dap_chain_init(void)
 {
-    /*if (dap_cert_init() != 0) {
-        log_it(L_CRITICAL,"Can't chain certificate storage module");
-        return -4;
-    }*/
-
     uint16_t l_ca_folders_size = 0;
     char ** l_ca_folders;
     l_ca_folders = dap_config_get_array_str(g_config, "resources", "ca_folders", &l_ca_folders_size);
+    dap_cert_init(l_ca_folders_size);
     for (uint16_t i=0; i < l_ca_folders_size; i++) {
         dap_cert_add_folder(l_ca_folders[i]);
     }
@@ -211,9 +207,15 @@ void dap_chain_delete(dap_chain_t * a_chain)
  */
 dap_chain_atom_ptr_t dap_chain_get_atom_by_hash(dap_chain_t * a_chain, dap_chain_hash_fast_t * a_atom_hash, size_t * a_atom_size)
 {
-    dap_chain_atom_iter_t * l_iter = a_chain->callback_atom_iter_create(a_chain);
-    dap_chain_atom_ptr_t l_ret = a_chain->callback_atom_find_by_hash(l_iter, a_atom_hash, a_atom_size);
-    a_chain->callback_atom_iter_delete(l_iter);
+    dap_chain_atom_ptr_t l_ret = NULL;
+    dap_chain_cell_t *l_cell, *l_iter_tmp;
+    HASH_ITER(hh, a_chain->cells, l_cell, l_iter_tmp) {
+        dap_chain_atom_iter_t * l_iter = a_chain->callback_atom_iter_create(a_chain, l_cell->id, 0);
+        l_ret = a_chain->callback_atom_find_by_hash(l_iter, a_atom_hash, a_atom_size);
+        a_chain->callback_atom_iter_delete(l_iter);
+        if (l_ret)
+            break;
+    }
     return l_ret;
 }
 
@@ -257,6 +259,9 @@ static dap_chain_type_t s_chain_type_from_str(const char *a_type_str)
     if(!dap_strcmp(a_type_str, "ca")) {
         return CHAIN_TYPE_CA;
     }
+    if(!dap_strcmp(a_type_str, "signer")) {
+	    return CHAIN_TYPE_SIGNER;
+    }
     return CHAIN_TYPE_LAST;
 }
 
@@ -277,6 +282,12 @@ static uint16_t s_datum_type_from_str(const char *a_type_str)
     if(!dap_strcmp(a_type_str, "transaction")) {
         return DAP_CHAIN_DATUM_TX;
     }
+    if(!dap_strcmp(a_type_str, "ca")) {
+        return DAP_CHAIN_DATUM_CA;
+    }
+    if (!dap_strcmp(a_type_str, "signer")) {
+        return DAP_CHAIN_DATUM_SIGNER;
+    }
     return DAP_CHAIN_DATUM_CUSTOM;
 }
 
@@ -289,12 +300,14 @@ static uint16_t s_datum_type_from_str(const char *a_type_str)
 static uint16_t s_chain_type_convert(dap_chain_type_t a_type)
 {
     switch (a_type) {
-    case CHAIN_TYPE_TOKEN:
+    case CHAIN_TYPE_TOKEN: 
         return DAP_CHAIN_DATUM_TOKEN_DECL;
     case CHAIN_TYPE_EMISSION:
         return DAP_CHAIN_DATUM_TOKEN_EMISSION;
     case CHAIN_TYPE_TX:
         return DAP_CHAIN_DATUM_TX;
+    case CHAIN_TYPE_CA:
+        return DAP_CHAIN_DATUM_CA;
     default:
         return DAP_CHAIN_DATUM_CUSTOM;
     }
@@ -334,7 +347,6 @@ dap_chain_t * dap_chain_load_from_cfg(dap_ledger_t* a_ledger, const char * a_cha
                 }
             }
             l_chain_id.uint64 = l_chain_id_u;
-
 
             if (l_chain_id_str ) {
                 log_it (L_NOTICE, "Chain id 0x%016"DAP_UINT64_FORMAT_x"  ( \"%s\" )",l_chain_id.uint64 , l_chain_id_str) ;
@@ -550,10 +562,10 @@ void dap_chain_add_callback_notify(dap_chain_t * a_chain, dap_chain_callback_not
  * @param a_atom_hash
  * @return
  */
-bool dap_chain_get_atom_last_hash(dap_chain_t * a_chain, dap_hash_fast_t * a_atom_hash)
+bool dap_chain_get_atom_last_hash(dap_chain_t *a_chain, dap_hash_fast_t *a_atom_hash, dap_chain_cell_id_t a_cel_id)
 {
     bool l_ret = false;
-    dap_chain_atom_iter_t *l_atom_iter = a_chain->callback_atom_iter_create(a_chain);
+    dap_chain_atom_iter_t *l_atom_iter = a_chain->callback_atom_iter_create(a_chain, a_cel_id, 0);
     dap_chain_atom_ptr_t * l_lasts_atom;
     size_t l_lasts_atom_count=0;
     size_t* l_lasts_atom_size =NULL;

@@ -127,11 +127,13 @@ dap_sign_type_t dap_pkey_type_from_sign( dap_pkey_type_t a_pkey_type);
 uint8_t* dap_sign_get_sign(dap_sign_t *a_sign, size_t *a_sign_out);
 uint8_t* dap_sign_get_pkey(dap_sign_t *a_sign, size_t *a_pub_key_out);
 bool dap_sign_get_pkey_hash(dap_sign_t *a_sign, dap_chain_hash_fast_t * a_sign_hash);
+bool dap_sign_match_pkey_signs(dap_sign_t *l_sign1, dap_sign_t *l_sign2);
 
 bool dap_sign_verify_size(dap_sign_t *a_sign, size_t a_max_key_size);
 dap_enc_key_t *dap_sign_to_enc_key(dap_sign_t * a_chain_sign);
 const char * dap_sign_type_to_str(dap_sign_type_t a_chain_sign_type);
 dap_sign_type_t dap_sign_type_from_str(const char * a_type_str);
+dap_sign_t **dap_sign_get_unique_signs(void *a_data, size_t a_data_size, size_t *a_signs_count);
 
 uint8_t *dap_multi_sign_serialize(dap_multi_sign_t *a_sign, size_t *a_out_len);
 dap_multi_sign_t *dap_multi_sign_deserialize(dap_sign_type_enum_t a_type, uint8_t *a_sign, size_t a_sign_len);
@@ -141,7 +143,7 @@ dap_multi_sign_t *dap_multi_sign_create(dap_multi_sign_params_t *a_params, const
 int dap_multi_sign_verify(dap_multi_sign_t *a_sign, const void *a_data, const size_t a_data_size);
 void dap_multi_sign_delete(dap_multi_sign_t *a_sign);
 
-void dap_sign_get_information(dap_sign_t* a_sign, dap_string_t *a_str_out, const char *a_hash_out_type);
+void dap_sign_get_information(dap_sign_t *a_sign, dap_string_t *a_str_out, const char *a_hash_out_type);
 
 #ifdef __cplusplus
 }

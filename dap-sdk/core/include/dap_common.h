@@ -25,7 +25,9 @@
 //#define _XOPEN_SOURCE 700
 
 #pragma once
+#ifndef __STDC_WANT_LIB_EXT1__
 #define __STDC_WANT_LIB_EXT1__ 1
+#endif
 #include <string.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -58,16 +60,17 @@
 #include "portable_endian.h"
 typedef uint8_t byte_t;
 
+#define BIT( x ) ( 1 << x )
 // Stuffs an integer into a pointer type
-#define DAP_INT_TO_POINTER(i) ((void*) (ssize_t) (i))
+#define DAP_INT_TO_POINTER(i) ((void*) (size_t) (i))
 // Extracts an integer from a pointer
-#define DAP_POINTER_TO_INT(p) ((int)  (ssize_t) (p))
+#define DAP_POINTER_TO_INT(p) ((int)  (size_t) (void *) (p))
 // Stuffs an unsigned integer into a pointer type
-#define DAP_UINT_TO_POINTER(u) ((void*) (size_t) (u))
+#define DAP_UINT_TO_POINTER(u) ((void*) (unsigned long) (u))
 // Extracts an unsigned integer from a pointer
-#define DAP_POINTER_TO_UINT(p) ((unsigned int) (size_t) (p))
+#define DAP_POINTER_TO_UINT(p) ((unsigned int) (unsigned long) (p))
 // Stuffs a size_t into a pointer type
-#define DAP_SIZE_TO_POINTER(s) ((void*) (s))
+#define DAP_SIZE_TO_POINTER(s) ((void*) (size_t) (s))
 // Extracts a size_t from a pointer
 #define DAP_POINTER_TO_SIZE(p) ((size_t) (p))
 
@@ -138,12 +141,12 @@ typedef uint8_t byte_t;
   #define DAP_NEW_Z( a )        DAP_CAST_REINT(a, calloc(1,sizeof(a)))
   #define DAP_NEW_Z_SIZE(a, b)  DAP_CAST_REINT(a, calloc(1,b))
   #define DAP_REALLOC(a, b)     realloc(a,b)
-  #define DAP_DELETE(a)         free(a)
+  #define DAP_DELETE(a)         free((void *)a)
   #define DAP_DUP(a)            memcpy(malloc(sizeof(*a)), a, sizeof(*a))
   #define DAP_DUP_SIZE(a, s)    memcpy(malloc(s), a, s)
 #endif
 
-#define DAP_DEL_Z(a)          if(a) { DAP_DELETE(a); a=NULL;}
+#define DAP_DEL_Z(a)            if (a) { DAP_DELETE((void *)a); (a) = NULL; }
 
 DAP_STATIC_INLINE void *_dap_aligned_alloc( uintptr_t alignment, uintptr_t size )
 {
@@ -280,7 +283,7 @@ typedef int dap_spinlock_t;
  * @brief The log_level enum
  */
 
-typedef enum dap_log_level { 
+typedef enum dap_log_level {
 
   L_DEBUG     = 0,
   L_INFO      = 1,
@@ -289,7 +292,7 @@ typedef enum dap_log_level {
   L_DAP       = 4,
   L_WARNING   = 5,
   L_ATT       = 6,
-  L_ERROR     = 7, 
+  L_ERROR     = 7,
   L_CRITICAL  = 8,
   L_TOTAL,
 
@@ -454,6 +457,8 @@ char *dap_log_get_item(time_t a_start_time, int a_limit);
 
 DAP_PRINTF_ATTR(3, 4) void _log_it( const char * log_tag, enum dap_log_level, const char * format, ... );
 #define log_it( _log_level, ...) _log_it( LOG_TAG, _log_level, ##__VA_ARGS__)
+#define debug_if( flg, lvl, ...) _log_it( ((flg) ? LOG_TAG : NULL), (lvl), ##__VA_ARGS__)
+
 
 const char * log_error(void);
 void dap_log_level_set(enum dap_log_level ll);
@@ -509,7 +514,10 @@ static inline void * dap_mempcpy(void * a_dest,const void * a_src,size_t n)
     return ((byte_t*) memcpy(a_dest,a_src,n))+n;
 }
 
-
+int dap_is_alpha_and_(char e);
+int dap_is_alpha(char e);
+int dap_is_digit(char e);
+char **dap_parse_items(const char *a_str, char a_delimiter, int *a_count, const int a_only_digit);
 
 #ifdef __MINGW32__
 int exec_silent(const char *a_cmd);

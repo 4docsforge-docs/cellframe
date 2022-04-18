@@ -26,8 +26,6 @@
 #include "dap_list.h"
 #include "dap_enc_key.h"
 #include "dap_chain_common.h"
-#include "dap_chain_datum.h"
-
 
 typedef enum dap_chain_tx_cond_type {
     COND_SERVICE_PROVIDE = 0x20, //
@@ -79,7 +77,7 @@ int dap_chain_datum_tx_add_item(dap_chain_datum_tx_t **a_tx, const uint8_t *a_it
  *
  * return summary value from inserted items
  */
-uint64_t dap_chain_datum_tx_add_in_item_list(dap_chain_datum_tx_t **a_tx, dap_list_t *a_list_used_out);
+uint256_t dap_chain_datum_tx_add_in_item_list(dap_chain_datum_tx_t **a_tx, dap_list_t *a_list_used_out);
 
 /**
  * Create 'in' item and insert to transaction
@@ -104,7 +102,14 @@ int dap_chain_datum_tx_add_in_cond_item(dap_chain_datum_tx_t **a_tx, dap_chain_h
  *
  * return 1 Ok, -1 Error
  */
-int dap_chain_datum_tx_add_out_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr, uint64_t a_value);
+int dap_chain_datum_tx_add_out_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr, uint256_t a_value);
+
+/**
+ * Create 'out_cond' item with fee value and insert to transaction
+ *
+ * return 1 Ok, -1 Error
+ */
+int dap_chain_datum_tx_add_fee_item(dap_chain_datum_tx_t **a_tx, uint256_t a_value);
 
 /**
  * Create 'out'_ext item and insert to transaction
@@ -112,15 +117,16 @@ int dap_chain_datum_tx_add_out_item(dap_chain_datum_tx_t **a_tx, const dap_chain
  * return 1 Ok, -1 Error
  */
 int dap_chain_datum_tx_add_out_ext_item(dap_chain_datum_tx_t **a_tx, const dap_chain_addr_t *a_addr,
-                                        uint64_t a_value, const char *a_token);
+                                        uint256_t a_value, const char *a_token);
 
 /**
  * Create 'out_cond' item and insert to transaction
  *
  * return 1 Ok, -1 Error
  */
-int dap_chain_datum_tx_add_out_cond_item(dap_chain_datum_tx_t **a_tx, dap_enc_key_t *a_key, dap_chain_net_srv_uid_t a_srv_uid,
-        uint64_t a_value, uint64_t a_value_max_per_unit, dap_chain_net_srv_price_unit_uid_t a_unit, const void *a_cond, size_t a_cond_size);
+
+int dap_chain_datum_tx_add_out_cond_item(dap_chain_datum_tx_t **a_tx, dap_pkey_t *a_key, dap_chain_net_srv_uid_t a_srv_uid,
+        uint256_t a_value, uint256_t a_value_max_per_unit, dap_chain_net_srv_price_unit_uid_t a_unit, const void *a_cond, size_t a_cond_size);
 
 /**
 * Sign a transaction (Create sign item and insert to transaction)

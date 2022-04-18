@@ -124,12 +124,12 @@ size_t dap_chain_node_info_get_size(dap_chain_node_info_t *node_info);
 /**
  * Generate node addr by shard id
  */
-dap_chain_node_addr_t* dap_chain_node_gen_addr(dap_chain_net_t * l_net,dap_chain_cell_id_t *a_cell_id);
+dap_chain_node_addr_t* dap_chain_node_gen_addr(dap_chain_net_id_t a_net_id);
 
 /**
  * Check the validity of the node address by shard id
  */
-bool dap_chain_node_check_addr(dap_chain_net_t * l_net,dap_chain_node_addr_t *addr, dap_chain_cell_id_t *a_cell_id);
+bool dap_chain_node_check_addr(dap_chain_net_t * l_net,dap_chain_node_addr_t *addr);
 
 dap_chain_node_addr_t * dap_chain_node_alias_find(dap_chain_net_t * l_net,const char *alias);
 bool dap_chain_node_alias_register(dap_chain_net_t *a_net, const char *a_alias, dap_chain_node_addr_t *a_addr);
@@ -147,6 +147,3 @@ inline static char* dap_chain_node_addr_to_hash_str(dap_chain_node_addr_t *addre
 int dap_chain_node_mempool_process(dap_chain_t *a_chain, dap_chain_datum_t *a_datum);
 bool dap_chain_node_mempool_autoproc_init();
 void dap_chain_node_mempool_autoproc_deinit();
-void dap_chain_node_mempool_autoproc_notify(void *a_arg, const char a_op_code, const char *a_group,
-                                             const char *a_key, const void *a_value, const size_t a_value_len);
-

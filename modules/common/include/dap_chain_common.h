@@ -45,6 +45,7 @@
 
 #define DATOSHI_LD 1000000000.0L
 #define DATOSHI_DEGREE 9
+#define DATOSHI_DEGREE_18   18
 #define DATOSHI_POW 38
 
 // Chain ID of the whole system
@@ -141,7 +142,7 @@ typedef struct dap_chain_addr{
 }  DAP_ALIGN_PACKED dap_chain_addr_t;
 
 typedef uint64_t dap_chain_time_t;
-static inline dap_chain_time_t dap_chain_time_now() { return (dap_chain_time_t) time(NULL); }
+dap_chain_time_t dap_chain_time_now();
 
 #define DAP_CHAIN_NET_SRV_UID_SIZE 8
 
@@ -163,6 +164,7 @@ typedef enum {
     SERV_UNIT_DAY = 0x00000003,  // days
     SERV_UNIT_KB = 0x00000010,  // kilobytes
     SERV_UNIT_B = 0x00000011,   // bytes
+    SERV_UNIT_PCS = 0x00000022  // pieces
 } serv_unit_enum_t;
 
 DAP_STATIC_INLINE const char *serv_unit_enum_to_str(serv_unit_enum_t *unit_enum){
@@ -173,6 +175,7 @@ DAP_STATIC_INLINE const char *serv_unit_enum_to_str(serv_unit_enum_t *unit_enum)
     case SERV_UNIT_DAY: return "SERV_UNIT_DAY";
     case SERV_UNIT_KB: return "SERV_UNIT_KB";
     case SERV_UNIT_B: return "SERV_UNIT_B";
+    case SERV_UNIT_PCS: return "SERV_UNIT_PCS";
     default: return "UNDEFINED";
 
     }
@@ -191,14 +194,21 @@ typedef union {
 
 enum dap_chain_tx_item_type {
     TX_ITEM_TYPE_IN = 0x00, /// @brief  Transaction: inputs
-    TX_ITEM_TYPE_OUT = 0x10, /// @brief  Transaction: outputs
+
+    TX_ITEM_TYPE_OUT_OLD = 0x10, /// @brief  Transaction: outputs
     TX_ITEM_TYPE_OUT_EXT = 0x11,
+    TX_ITEM_TYPE_OUT = 0x12, // 256
+
     TX_ITEM_TYPE_PKEY = 0x20,
     TX_ITEM_TYPE_SIG = 0x30,
     TX_ITEM_TYPE_TOKEN = 0x40,
     TX_ITEM_TYPE_TOKEN_EXT = 0x41,
+
     TX_ITEM_TYPE_IN_COND = 0x50, /// @brief  Transaction: conditon inputs
-    TX_ITEM_TYPE_OUT_COND = 0x60, /// @brief  Transaction: conditon outputs
+
+    TX_ITEM_TYPE_OUT_COND_OLD = 0x60, // Obsolete
+    TX_ITEM_TYPE_OUT_COND = 0x61, /// @brief  Transaction: 256 bit conditon outputs
+
     TX_ITEM_TYPE_RECEIPT = 0x70,
 
     TX_ITEM_TYPE_OUT_ALL = 0xfe,
@@ -206,14 +216,18 @@ enum dap_chain_tx_item_type {
 };
 typedef byte_t dap_chain_tx_item_type_t;
 
-
-typedef struct dap_chain_receipt{
+typedef struct dap_chain_receipt_info {
     dap_chain_net_srv_uid_t srv_uid; // Service UID
+#if DAP_CHAIN_NET_SRV_UID_SIZE == 8
+    uint64_t addition;
+#endif
     dap_chain_net_srv_price_unit_uid_t units_type;
     uint64_t units; // Unit of service (seconds, megabytes, etc.) Only for SERV_CLASS_PERMANENT
-    uint64_t value_datoshi; // Receipt value
+    union {
+        uint256_t value_datoshi; // Receipt value
+        uint64_t value_64;       // Old receipts compliance
+    };
 } dap_chain_receipt_info_t;
-
 
 #ifdef __cplusplus
 extern "C" {
@@ -244,20 +258,45 @@ DAP_STATIC_INLINE uint64_t dap_chain_coins_to_datoshi(long double a_count)
 
 DAP_STATIC_INLINE uint128_t dap_chain_uint128_from(uint64_t a_from)
 {
-#ifdef DAP_GLOBAL_IS_INT128
-    return (uint128_t)a_from;
-#else
-    uint128_t l_ret = { .hi=0, .lo=a_from };
+    uint128_t l_ret = uint128_0;
+    ADD_64_INTO_128(a_from, &l_ret );
     return l_ret;
-#endif
+}
+
+// 256
+uint128_t dap_chain_uint128_from_uint256(uint256_t a_from);
+
+// 256
+DAP_STATIC_INLINE uint256_t dap_chain_uint256_from(uint64_t a_from)
+{
+    uint128_t l_temp_128 = uint128_0;
+    uint256_t l_ret_256 = uint256_0;
+    ADD_64_INTO_128(a_from, &l_temp_128);
+    ADD_128_INTO_256(l_temp_128, &l_ret_256);
+    return l_ret_256;
+}
+
+DAP_STATIC_INLINE uint256_t dap_chain_uint256_from_uint128(uint128_t a_from)
+{
+    uint256_t l_ret_256 = uint256_0;
+    ADD_128_INTO_256(a_from, &l_ret_256);
+    return l_ret_256;
 }
 
 uint64_t dap_chain_uint128_to(uint128_t a_from);
+// 256
+uint64_t dap_chain_uint256_to(uint256_t a_from);
 
-char *dap_chain_balance_print(uint128_t a_balance);
-char *dap_chain_balance_to_coins(uint128_t a_balance);
-uint128_t dap_chain_balance_scan(char *a_balance);
-uint128_t dap_chain_coins_to_balance(char *a_coins);
+char *dap_chain_balance_print(uint256_t a_balance);
+char *dap_chain_balance_to_coins(uint256_t a_balance);
+uint256_t dap_chain_balance_scan(const char *a_balance);
+
+char *dap_cvt_uint256_to_str(uint256_t a_uint256);
+uint256_t dap_cvt_str_to_uint256(const char *a_256bit_num);
+
+
+uint256_t dap_chain_coins_to_balance(const char *a_coins);
+
 
 /**
  * @brief dap_chain_hash_to_str

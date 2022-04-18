@@ -37,6 +37,7 @@
 #include "dap_strfuncs.h"
 #include "dap_cert.h"
 #include "dap_cert_file.h"
+#include "utarray.h"
 //#include "dap_hash.h"
 #define LOG_TAG "dap_cert"
 
@@ -55,12 +56,6 @@ typedef struct dap_cert_item
     UT_hash_handle hh;
 } dap_cert_item_t;
 
-typedef struct dap_cert_folder
-{
-    char *name;
-    UT_hash_handle hh;
-} dap_cert_folder_t;
-
 typedef struct dap_cert_pvt
 {
     dap_sign_item_t *signs;
@@ -70,14 +65,18 @@ typedef struct dap_cert_pvt
 #define PVT(a) ( ( dap_cert_pvt_t *)((a)->_pvt) )
 
 static dap_cert_item_t * s_certs = NULL;
-static dap_cert_folder_t * s_cert_folders = NULL;
+static UT_array *s_cert_folders = NULL;
 
 /**
  * @brief dap_cert_init empty stub for certificate init
  * @return
  */
-int dap_cert_init()
+int dap_cert_init() // TODO deinit too
 {
+    uint16_t l_ca_folders_size = 0;
+    dap_config_get_array_str(g_config, "resources", "ca_folders", &l_ca_folders_size);
+    utarray_new(s_cert_folders, &ut_str_icd);
+    utarray_reserve(s_cert_folders, l_ca_folders_size);
     return 0;
 }
 
@@ -179,8 +178,8 @@ dap_sign_t * dap_cert_sign(dap_cert_t * a_cert, const void * a_data
     if (l_ret)
         log_it(L_INFO, "Sign sizes: %d %d", l_ret->header.sign_size, l_ret->header.sign_pkey_size);
     else
-        log_it(L_ERROR, "dap_sign_create returns NULL"); 
-
+        log_it(L_ERROR, "dap_sign_create return NULL"); 
+        
     return l_ret;
 }
 
@@ -293,30 +292,32 @@ void dap_cert_delete_by_name(const char * a_cert_name)
  * @param a_cert_name const char *
  * @return
  */
-dap_cert_t * dap_cert_find_by_name(const char * a_cert_name)
+dap_cert_t *dap_cert_find_by_name(const char *a_cert_name)
 {
-    dap_cert_item_t * l_cert_item = NULL;
-    HASH_FIND_STR(s_certs,a_cert_name,l_cert_item);
-    if ( l_cert_item ){
-        return l_cert_item->cert ;
+    if (!a_cert_name)
+        return NULL;
+    dap_cert_item_t *l_cert_item = NULL;
+    dap_cert_t *l_ret = NULL;
+    HASH_FIND_STR(s_certs, a_cert_name, l_cert_item);
+    if (l_cert_item ) {
+        l_ret = l_cert_item->cert ;
     } else {
-            dap_cert_t *l_cert = NULL;
-            uint16_t l_ca_folders_size = 0;
-            char **l_ca_folders;
-            char *l_cert_path = NULL;
-            l_ca_folders = dap_config_get_array_str(g_config, "resources", "ca_folders", &l_ca_folders_size);
-            for (uint16_t i = 0; i < l_ca_folders_size; ++i) {
-                l_cert_path = dap_strjoin("", l_ca_folders[i], "/", a_cert_name, ".dcert", (char*)NULL);
-                l_cert = dap_cert_file_load(l_cert_path);
-                if (l_cert) {
-                    goto ret;
-                }
-            }
-    ret:
-            if (l_cert_path)
-                DAP_DELETE(l_cert_path);
-            return l_cert;
+        uint16_t l_ca_folders_size = 0;
+        char **l_ca_folders;
+        char *l_cert_path = NULL;
+        l_ca_folders = dap_config_get_array_str(g_config, "resources", "ca_folders", &l_ca_folders_size);
+        for (uint16_t i = 0; i < l_ca_folders_size; ++i) {
+            l_cert_path = dap_strjoin("", l_ca_folders[i], "/", a_cert_name, ".dcert", (char *)NULL);
+            l_ret = dap_cert_file_load(l_cert_path);
+            DAP_DELETE(l_cert_path);
+            if (l_ret)
+                break;
         }
+    }
+    if (!l_ret)
+        log_it(L_DEBUG, "Can't load cert '%s'", a_cert_name);
+    return l_ret;
+
 }
 
 dap_list_t *dap_cert_get_all_mem()
@@ -524,17 +525,8 @@ void dap_cert_dump(dap_cert_t * a_cert)
  */
 const char* dap_cert_get_folder(int a_n_folder_path)
 {
-    dap_cert_folder_t *l_cert_folder_item = NULL, *l_cert_folder_item_tmp = NULL;
-    int l_n_cur_folder_path = 0;
-    HASH_ITER(hh, s_cert_folders, l_cert_folder_item, l_cert_folder_item_tmp)
-    {
-        if(l_cert_folder_item) {
-            if(a_n_folder_path == l_n_cur_folder_path)
-                return l_cert_folder_item->name;
-            l_n_cur_folder_path++;
-        }
-    }
-    return NULL;
+    char **p = utarray_eltptr(s_cert_folders, (u_int)a_n_folder_path);
+    return *p;
 }
 
 
@@ -545,12 +537,7 @@ const char* dap_cert_get_folder(int a_n_folder_path)
  */
 void dap_cert_add_folder(const char *a_folder_path)
 {
-    // save dir
-    {
-        dap_cert_folder_t * l_cert_folder_item = DAP_NEW_Z(dap_cert_folder_t);
-        l_cert_folder_item->name = dap_strdup(a_folder_path);
-        HASH_ADD_STR(s_cert_folders, name, l_cert_folder_item);
-    }
+    utarray_push_back(s_cert_folders, &a_folder_path);
     dap_mkdir_with_parents(a_folder_path);
     DIR * l_dir = opendir(a_folder_path);
     if( l_dir ) {

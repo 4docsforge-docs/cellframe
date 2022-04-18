@@ -60,6 +60,7 @@ void dap_chain_block_deinit()
  */
 dap_chain_block_t *dap_chain_block_new(dap_chain_hash_fast_t *a_prev_block, size_t *a_block_size)
 {
+    // Type sizeof's misunderstanding in malloc?
     dap_chain_block_t * l_block = DAP_NEW_Z_SIZE (dap_chain_block_t,sizeof(l_block->hdr));
     if( l_block == NULL){
         log_it(L_CRITICAL, "Can't allocate memory for the new block");
@@ -68,6 +69,10 @@ dap_chain_block_t *dap_chain_block_new(dap_chain_hash_fast_t *a_prev_block, size
         l_block->hdr.signature = DAP_CHAIN_BLOCK_SIGNATURE;
         l_block->hdr.version = 1;
         l_block->hdr.ts_created = time(NULL);
+
+        dap_chain_hash_fast_t l_hash_null={0};
+        memcpy(&l_block->hdr.merkle, &l_hash_null, sizeof(dap_chain_hash_fast_t));
+
         size_t l_block_size = sizeof(l_block->hdr);
         if( a_prev_block ){
             l_block_size = dap_chain_block_meta_add(&l_block, l_block_size, DAP_CHAIN_BLOCK_META_PREV,
@@ -360,7 +365,7 @@ dap_sign_t *dap_chain_block_sign_get ( dap_chain_block_t * a_block, size_t a_blo
         }
         l_offset += l_sign_size;
         l_sign_cur++;
-        l_sign = (dap_sign_t*) a_block->meta_n_datum_n_sign+l_offset;
+        l_sign = (dap_sign_t*)(a_block->meta_n_datum_n_sign+l_offset);
     }
     return l_sign_cur == a_sign_num ? l_sign : NULL;
 }
@@ -371,8 +376,8 @@ size_t dap_chain_block_get_signs_count(dap_chain_block_t * a_block, size_t a_blo
     assert(a_block_size);
     uint16_t l_sign_count = 0;
     size_t l_offset = dap_chain_block_get_sign_offset(a_block,a_block_size);
-    for ( ; l_offset < a_block_size; l_sign_count++) {
-        dap_sign_t *l_sign = (dap_sign_t *)a_block->meta_n_datum_n_sign + l_offset;
+    for ( ; l_offset+sizeof(a_block->hdr) < a_block_size; l_sign_count++) {
+        dap_sign_t *l_sign = (dap_sign_t *)(a_block->meta_n_datum_n_sign + l_offset);
         size_t l_sign_size = dap_sign_get_size(l_sign);
         if (!l_sign_size){
             log_it(L_WARNING, "Empty sign #%hu", l_sign_count);
@@ -510,7 +515,6 @@ void dap_chain_block_meta_extract(dap_chain_block_meta_t ** a_meta, size_t a_met
     if (a_block_links_count)
         *a_block_links_count = 0;
 
-
     for(size_t i = 0; i < a_meta_count; i++){
         dap_chain_block_meta_t * l_meta = a_meta[i];
         switch (l_meta->hdr.type) {
@@ -552,6 +556,7 @@ void dap_chain_block_meta_extract(dap_chain_block_meta_t ** a_meta, size_t a_met
             case DAP_CHAIN_BLOCK_META_LINK:
                 if ( a_block_links && a_block_links_count){
                     if ( *a_block_links_count == 0 ){
+                        // Type sizeof's misunderstanding in malloc?
                         *a_block_links = DAP_NEW_Z_SIZE(dap_chain_hash_fast_t, sizeof (dap_chain_hash_fast_t *) *l_links_count_max);
                         *a_block_links_count = 0;
                     }else if ( *a_block_links_count == l_links_count_max ){

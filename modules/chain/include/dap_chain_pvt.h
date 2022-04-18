@@ -24,14 +24,10 @@
 #pragma once
 #include <stdio.h>
 #include <stdint.h>
-#include "dap_common.h"
 #include "dap_chain.h"
-
 #include "dap_chain_cs.h"
 #include "dap_chain_cell.h"
-
-
-
+#include "dap_common.h"
 /**
   * @struct dap_chain_pvt
   * @brief Internal blochain data, mostly aggregated
@@ -43,6 +39,7 @@ typedef struct dap_chain_pvt
     char * file_storage_dir;
     char * cs_name;
     int celled;
+    dap_list_t *mempool_notifires;
 } dap_chain_pvt_t;
 
 #define DAP_CHAIN_PVT(a) ((dap_chain_pvt_t *) a->_pvt  )
@@ -50,4 +47,3 @@ typedef struct dap_chain_pvt
 #define DAP_CHAIN_PVT_LOCAL(a) dap_chain_pvt_t * l_chain_pvt = DAP_CHAIN_PVT(a)
 
 #define DAP_CHAIN_PVT_LOCAL_NEW(a) dap_chain_pvt_t * l_chain_pvt = DAP_NEW_Z(dap_chain_pvt_t); a->_pvt = l_chain_pvt
-

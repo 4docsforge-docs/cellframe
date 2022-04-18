@@ -20,9 +20,13 @@
     You should have received a copy of the GNU General Public License
     along with any DAP SDK based project.  If not, see <http://www.gnu.org/licenses/>.
 */
-
-#include <assert.h>
 #include <errno.h>
+#include <stdatomic.h>
+
+#include "dap_config.h"
+#include "dap_events.h"
+#include "dap_events_socket.h"
+#include "dap_proc_thread.h"
 #include "dap_server.h"
 
 #if defined(DAP_EVENTS_CAPS_EPOLL) && !defined(DAP_OS_WINDOWS)
@@ -51,17 +55,12 @@ typedef cpuset_t cpu_set_t; // Adopt BSD CPU setstructure to POSIX variant
 #error "Unimplemented poll for this platform"
 #endif
 
-#include "dap_config.h"
-#include "dap_events.h"
-#include "dap_events_socket.h"
-#include "dap_proc_thread.h"
-
 #define LOG_TAG "dap_proc_thread"
 
 static size_t s_threads_count = 0;
-static bool s_debug_reactor = false;
+static int  s_debug_reactor = 0;
 static dap_proc_thread_t * s_threads = NULL;
-static void * s_proc_thread_function(void * a_arg);
+static void *s_proc_thread_function(void * a_arg);
 static void s_event_exit_callback( dap_events_socket_t * a_es, uint64_t a_flags);
 
 /**
@@ -69,28 +68,33 @@ static void s_event_exit_callback( dap_events_socket_t * a_es, uint64_t a_flags)
  * @param a_cpu_count 0 means autodetect
  * @return
  */
-int dap_proc_thread_init(uint32_t a_threads_count){
+static pthread_cond_t  s_started_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t s_started_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int dap_proc_thread_init(uint32_t a_threads_count)
+{
+int l_ret = 0;
+
     s_threads_count = a_threads_count ? a_threads_count : dap_get_cpu_count( );
     s_threads = DAP_NEW_Z_SIZE(dap_proc_thread_t, sizeof (dap_proc_thread_t)* s_threads_count);
-    s_debug_reactor = g_config? dap_config_get_item_bool_default(g_config,"general","debug_reactor",false) : false;
-    for (size_t i = 0; i < s_threads_count; i++ ){
+    s_debug_reactor = g_config ? dap_config_get_item_bool_default(g_config, "general", "debug_reactor", false) : false;
 
+    for (uint32_t i = 0; i < s_threads_count; i++ )
+    {
         s_threads[i].cpu_id = i;
-        pthread_cond_init( &s_threads[i].started_cond, NULL );
-        pthread_mutex_init( &s_threads[i].started_mutex, NULL );
-        pthread_mutex_lock( &s_threads[i].started_mutex );
-        int res = pthread_create( &s_threads[i].thread_id,NULL, s_proc_thread_function, &s_threads[i] );
-        if (res) {
-            log_it(L_CRITICAL, "Create thread failed with code %d", res);
-            pthread_mutex_unlock( &s_threads[i].started_mutex );
-            return -1;
+        pthread_mutex_lock( &s_started_mutex );
+
+        if ( (l_ret = pthread_create( &s_threads[i].thread_id,NULL, s_proc_thread_function, &s_threads[i] )) ) {
+            log_it(L_CRITICAL, "Create thread failed with code %d", l_ret);
+            pthread_mutex_unlock( &s_started_mutex );
+            return l_ret;
         }
-        pthread_cond_wait( &s_threads[i].started_cond, &s_threads[i].started_mutex );
-        pthread_mutex_unlock( &s_threads[i].started_mutex );
+
+        pthread_cond_wait( &s_started_cond, &s_started_mutex);
+        pthread_mutex_unlock( &s_started_mutex);
     }
 
-
-    return 0;
+    return l_ret;
 }
 
 /**
@@ -102,7 +106,7 @@ void dap_proc_thread_deinit()
         dap_events_socket_event_signal(s_threads[i].event_exit, 1);
         pthread_join(s_threads[i].thread_id, NULL);
     }
-	
+
     // Signal to cancel working threads and wait for finish
     // TODO: Android realization
 //#ifndef DAP_OS_ANDROID
@@ -121,7 +125,7 @@ void dap_proc_thread_deinit()
  */
 dap_proc_thread_t * dap_proc_thread_get(uint32_t a_cpu_id)
 {
-    return a_cpu_id<s_threads_count? &s_threads[a_cpu_id] : NULL;
+    return (a_cpu_id < s_threads_count) ? &s_threads[a_cpu_id] : NULL;
 }
 
 /**
@@ -130,74 +134,91 @@ dap_proc_thread_t * dap_proc_thread_get(uint32_t a_cpu_id)
  */
 dap_proc_thread_t * dap_proc_thread_get_auto()
 {
-    size_t l_id_min=0;
-    size_t l_size_min=UINT32_MAX;
-    for (size_t i = 0; i < s_threads_count; i++ ){
-        size_t l_queue_size = s_threads[i].proc_queue_size;
+unsigned l_id_min = 0, l_size_min = UINT32_MAX, l_queue_size;
+
+    for (size_t i = 0; i < s_threads_count; i++ )
+    {
+        l_queue_size = atomic_load(&s_threads[i].proc_queue_size);
+
         if( l_queue_size < l_size_min ){
             l_size_min = l_queue_size;
             l_id_min = i;
         }
     }
-    return &s_threads[l_id_min];
 
+    return &s_threads[l_id_min];
 }
 
 /**
- * @brief s_proc_event_callback
+ * @brief s_proc_event_callback - get from queue next element and execute action routine,
+ *  repeat execution depending on status is returned by action routine.
+ *
  * @param a_esocket
  * @param a_value
+ *
  */
-static void s_proc_event_callback(dap_events_socket_t * a_esocket, uint64_t a_value)
+static void s_proc_event_callback(dap_events_socket_t * a_esocket, uint64_t __attribute__((unused))  a_value)
 {
-    (void) a_value;
-    if(s_debug_reactor)
-        log_it(L_DEBUG, "--> Proc event callback start");
-    dap_proc_thread_t * l_thread = (dap_proc_thread_t *) a_esocket->_inheritor;
-    dap_proc_queue_item_t * l_item = l_thread->proc_queue->item_first;
-    dap_proc_queue_item_t * l_item_old = NULL;
-    bool l_is_anybody_for_repeat=false;
-    while(l_item){
-        if(s_debug_reactor)
-            log_it(L_INFO, "Proc event callback: %p/%p", l_item->callback, l_item->callback_arg);
-        bool l_is_finished = l_item->callback(l_thread, l_item->callback_arg);
-        if (l_is_finished){
-            if ( l_item->prev ){
-                l_item->prev->next = l_item_old;
-            }
-            if(l_item_old){
-                l_item_old->prev = l_item->prev;
+dap_proc_thread_t   *l_thread;
+dap_proc_queue_item_t *l_item;
+int     l_rc, l_is_anybody_for_repeat, l_is_finished, l_iter_cnt, l_cur_pri;
+size_t  l_size;
+dap_proc_queue_t    *l_queue;
 
-                if ( ! l_item->prev ) { // We deleted tail
-                    l_thread->proc_queue->item_last = l_item_old;
-                }
+    debug_if (s_debug_reactor, L_DEBUG, "--> Proc event callback start, a_esocket:%p ", a_esocket);
 
-                DAP_DELETE(l_item);
-                l_item = l_item_old->prev;
-            }else{
-                l_thread->proc_queue->item_first = l_item->prev;
-                if ( l_item->prev){
-                    l_item->prev->next = NULL; // Prev if it was - now its NULL
-                }else
-                    l_thread->proc_queue->item_last = NULL; // NULL last item
-
-                DAP_DELETE(l_item);
-                l_item = l_thread->proc_queue->item_first;
-            }
-            if(s_debug_reactor)
-                log_it(L_DEBUG, "Proc event finished");
-        }else{
-            if(s_debug_reactor)
-                log_it(L_DEBUG, "Proc event not finished");
-            l_item_old = l_item;
-            l_item=l_item->prev;
+    if ( !(l_thread = (dap_proc_thread_t *) a_esocket->_inheritor) )
+        {
+        log_it(L_ERROR, "NULL <dap_proc_thread_t> context is detected");
+        return;
         }
-        l_is_anybody_for_repeat = !l_is_finished;
-    }
-    if(l_is_anybody_for_repeat) // Arm event if we have smth to proc again
-        dap_events_socket_event_signal(a_esocket,1);
-    if(s_debug_reactor)
-        log_it(L_DEBUG, "<-- Proc event callback end");
+
+    l_iter_cnt = l_is_anybody_for_repeat = 0;
+    /*@RRL:  l_iter_cnt = DAP_QUE$K_ITER_NR; */
+    l_cur_pri = (DAP_QUE$K_PRIMAX - 1);
+    l_queue = l_thread->proc_queue;
+
+    for ( ; l_cur_pri; l_cur_pri--, l_iter_cnt++ )                          /* Run from higest to lowest ... */
+    {
+        if ( !l_queue->list[l_cur_pri].items.nr )                           /* A lockless quick check */
+            continue;
+
+        pthread_mutex_lock(&l_queue->list[l_cur_pri].lock);                 /* Protect list from other threads */
+        l_rc = s_dap_remqhead (&l_queue->list[l_cur_pri].items, (void **) &l_item, &l_size);
+        pthread_mutex_unlock(&l_queue->list[l_cur_pri].lock);
+
+        if  ( l_rc == -ENOENT ) {                                           /* Queue is empty ? */
+            debug_if (s_debug_reactor, L_DEBUG, "a_esocket:%p - nothing to do at prio: %d ", a_esocket, l_cur_pri);
+            continue;
+        }
+
+        debug_if (s_debug_reactor, L_INFO, "Proc event callback: %p/%p, prio=%d, iteration=%d",
+                       l_item->callback, l_item->callback_arg, l_cur_pri, l_iter_cnt);
+
+        l_is_finished = l_item->callback(l_thread, l_item->callback_arg);
+        l_is_anybody_for_repeat++;
+
+        debug_if (s_debug_reactor, L_INFO, "Proc event callback: %p/%p, prio=%d, iteration=%d - is %sfinished",
+                           l_item->callback, l_item->callback_arg, l_cur_pri, l_iter_cnt, l_is_finished ? "" : "not ");
+
+        if ( !(l_is_finished) ) {
+                                                                            /* Rearm callback to be executed again */
+            pthread_mutex_lock(&l_queue->list[l_cur_pri].lock);
+            l_rc = s_dap_insqtail (&l_queue->list[l_cur_pri].items, l_item, 1);
+            pthread_mutex_unlock(&l_queue->list[l_cur_pri].lock);
+        }
+        else    {
+                    DAP_DELETE(l_item);
+    	}
+
+            l_is_anybody_for_repeat += (!l_is_finished);
+
+        }
+
+    if ( l_is_anybody_for_repeat )                                          /* Arm event if we have something to proc again */
+        dap_events_socket_event_signal(a_esocket, 1);
+
+    debug_if(s_debug_reactor, L_DEBUG, "<-- Proc event callback end, repeat flag is: %d, iterations: %d", l_is_anybody_for_repeat, l_iter_cnt);
 }
 
 
@@ -281,7 +302,7 @@ int dap_proc_thread_esocket_update_poll_flags(dap_proc_thread_t * a_thread, dap_
     a_esocket->ev.events = events;
     if( epoll_ctl(a_thread->epoll_ctl, EPOLL_CTL_MOD, a_esocket->socket, &a_esocket->ev) != 0 ){
 #ifdef DAP_OS_WINDOWS
-		errno = WSAGetLastError();
+        errno = WSAGetLastError();
 #endif
         log_it(L_CRITICAL, "Can't add proc queue on epoll ctl, err: %d", errno);
         return -1;
@@ -298,7 +319,7 @@ int dap_proc_thread_esocket_update_poll_flags(dap_proc_thread_t * a_thread, dap_
         a_thread->poll[a_esocket->poll_index].events |= POLLIN;
     if( a_esocket->flags & DAP_SOCK_READY_TO_WRITE)
         a_thread->poll[a_esocket->poll_index].events |= POLLOUT;
-        
+
 #elif defined (DAP_EVENTS_CAPS_KQUEUE)
 
     u_short l_flags = a_esocket->kqueue_base_flags;
@@ -310,7 +331,7 @@ int dap_proc_thread_esocket_update_poll_flags(dap_proc_thread_t * a_thread, dap_
     }
     struct kevent * l_event = &a_esocket->kqueue_event;
     // Check & add
-    bool l_is_error=false;
+    int l_is_error=false;
     int l_errno=0;
     if (a_esocket->type == DESCRIPTOR_TYPE_EVENT || a_esocket->type == DESCRIPTOR_TYPE_QUEUE){
         EV_SET(l_event, a_esocket->socket, EVFILT_USER,EV_ADD| EV_CLEAR ,0,0, &a_esocket->kqueue_event_catched_data );
@@ -345,7 +366,7 @@ int dap_proc_thread_esocket_update_poll_flags(dap_proc_thread_t * a_thread, dap_
         log_it(L_ERROR,"Can't update client socket state on kqueue fd %d: \"%s\" (%d)",
             l_kqueue_fd, l_errbuf, l_errno);
     }
-        
+
 #else
 #error "Not defined dap_proc_thread.c::s_update_poll_flags() on your platform"
 #endif
@@ -384,7 +405,7 @@ static void * s_proc_thread_function(void * a_arg)
     struct sched_param l_shed_params;
     l_shed_params.sched_priority = 0;
 #if defined(DAP_OS_WINDOWS)
-	if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
         log_it(L_ERROR, "Couldn't set thread priority, err: %lu", GetLastError());
 #elif defined (DAP_OS_LINUX)
     pthread_setschedparam(pthread_self(),SCHED_BATCH ,&l_shed_params);
@@ -404,11 +425,11 @@ static void * s_proc_thread_function(void * a_arg)
     dap_events_socket_assign_on_worker_mt(l_worker_related->proc_queue_input,l_worker_related);
 
     l_thread->proc_event = dap_events_socket_create_type_event_unsafe(NULL, s_proc_event_callback);
-	l_thread->event_exit = dap_events_socket_create_type_event_unsafe(NULL, s_event_exit_callback);
-	
+    l_thread->event_exit = dap_events_socket_create_type_event_unsafe(NULL, s_event_exit_callback);
+
     l_thread->proc_event->_inheritor = l_thread; // we pass thread through it
-	l_thread->event_exit->_inheritor = l_thread;
-	
+    l_thread->event_exit->_inheritor = l_thread;
+
     size_t l_workers_count= dap_events_worker_get_count();
     assert(l_workers_count);
     l_thread->queue_assign_input = DAP_NEW_Z_SIZE(dap_events_socket_t*, sizeof (dap_events_socket_t*)*l_workers_count  );
@@ -434,7 +455,7 @@ static void * s_proc_thread_function(void * a_arg)
     l_thread->proc_queue->esocket->ev.data.ptr  = l_thread->proc_queue->esocket;
     if( epoll_ctl(l_thread->epoll_ctl, EPOLL_CTL_ADD, l_thread->proc_queue->esocket->socket , &l_thread->proc_queue->esocket->ev) != 0 ){
 #ifdef DAP_OS_WINDOWS
-		errno = WSAGetLastError();    	
+        errno = WSAGetLastError();
 #endif
         log_it(L_CRITICAL, "Can't add proc queue %zu on epoll ctl, error %d", l_thread->proc_queue->esocket->socket, errno);
         return NULL;
@@ -445,12 +466,12 @@ static void * s_proc_thread_function(void * a_arg)
     l_thread->proc_event->ev.data.ptr   = l_thread->proc_event;
     if( epoll_ctl(l_thread->epoll_ctl, EPOLL_CTL_ADD, l_thread->proc_event->socket , &l_thread->proc_event->ev) != 0 ){
 #ifdef DAP_OS_WINDOWS
-		errno = WSAGetLastError();    	
+        errno = WSAGetLastError();
 #endif
         log_it(L_CRITICAL, "Can't add proc event on epoll ctl, err: %d", errno);
         return NULL;
     }
-	
+
     // Add exit event
     l_thread->event_exit->ev.events     = l_thread->event_exit->ev_base_flags;
     l_thread->event_exit->ev.data.ptr   = l_thread->event_exit;
@@ -468,7 +489,7 @@ static void * s_proc_thread_function(void * a_arg)
         l_thread->queue_assign_input[n]->ev.data.ptr    = l_thread->queue_assign_input[n];
         if( epoll_ctl(l_thread->epoll_ctl, EPOLL_CTL_ADD, l_thread->queue_assign_input[n]->socket, &l_thread->queue_assign_input[n]->ev) != 0 ){
 #ifdef DAP_OS_WINDOWS
-		errno = WSAGetLastError();    	
+        errno = WSAGetLastError();
 #endif
             log_it(L_CRITICAL, "Can't add queue input on epoll ctl, err: %d", errno);
             return NULL;
@@ -479,7 +500,7 @@ static void * s_proc_thread_function(void * a_arg)
         l_thread->queue_io_input[n]->ev.data.ptr    = l_thread->queue_io_input[n];
         if( epoll_ctl(l_thread->epoll_ctl, EPOLL_CTL_ADD, l_thread->queue_io_input[n]->fd , &l_thread->queue_io_input[n]->ev) != 0 ){
 #ifdef DAP_OS_WINDOWS
-		errno = WSAGetLastError();    	
+        errno = WSAGetLastError();
 #endif
             log_it(L_CRITICAL, "Can't add proc io input on epoll ctl, err: %d", errno);
             return NULL;
@@ -499,7 +520,7 @@ static void * s_proc_thread_function(void * a_arg)
 #elif defined(DAP_EVENTS_CAPS_POLL)
     l_thread->poll_count_max = DAP_EVENTS_SOCKET_MAX;
     l_thread->poll_count = 0;
-    bool l_poll_compress = false;
+    int l_poll_compress = false;
     l_thread->poll = DAP_NEW_Z_SIZE(struct pollfd,l_thread->poll_count_max *sizeof (*l_thread->poll));
     l_thread->esockets = DAP_NEW_Z_SIZE(dap_events_socket_t*,l_thread->poll_count_max *sizeof (*l_thread->esockets));
 
@@ -511,7 +532,7 @@ static void * s_proc_thread_function(void * a_arg)
     l_thread->poll[l_thread->poll_count].events = l_thread->proc_event->poll_base_flags;
     l_thread->esockets[l_thread->poll_count] = l_thread->proc_event;
     l_thread->poll_count++;
-	
+
     // Add exit event
     l_thread->poll[l_thread->poll_count].fd = l_thread->event_exit->fd;
     l_thread->poll[l_thread->poll_count].events = l_thread->event_exit->poll_base_flags;
@@ -554,7 +575,7 @@ static void * s_proc_thread_function(void * a_arg)
 
     dap_proc_thread_assign_esocket_unsafe(l_thread,l_thread->proc_queue->esocket);
     dap_proc_thread_assign_esocket_unsafe(l_thread,l_thread->proc_event);
-	dap_proc_thread_assign_esocket_unsafe(l_thread,l_thread->event_exit);
+    dap_proc_thread_assign_esocket_unsafe(l_thread,l_thread->event_exit);
 
     for (size_t n = 0; n< dap_events_worker_get_count(); n++){
         // Queue asssign
@@ -572,12 +593,12 @@ static void * s_proc_thread_function(void * a_arg)
 #endif
 
     //We've started!
-    pthread_mutex_lock(&l_thread->started_mutex);
-    pthread_mutex_unlock(&l_thread->started_mutex);
-    pthread_cond_broadcast(&l_thread->started_cond);
-	
-	l_thread->signal_exit = false;
-	
+    pthread_mutex_lock(&s_started_mutex);
+    pthread_mutex_unlock(&s_started_mutex);
+    pthread_cond_broadcast(&s_started_cond);
+
+    l_thread->signal_exit = false;
+
     // Main loop
     while (!l_thread->signal_kill && !l_thread->signal_exit){
 
@@ -612,7 +633,7 @@ static void * s_proc_thread_function(void * a_arg)
         }
         for(size_t n = 0; n < l_sockets_max; n++) {
             dap_events_socket_t * l_cur;
-            bool l_flag_hup, l_flag_rdhup, l_flag_read, l_flag_write, l_flag_error,
+            int l_flag_hup, l_flag_rdhup, l_flag_read, l_flag_write, l_flag_error,
                     l_flag_nval,l_flag_pri,l_flag_msg;
 #ifdef DAP_EVENTS_CAPS_EPOLL
             l_cur = (dap_events_socket_t *) l_epoll_events[n].data.ptr;
@@ -708,7 +729,7 @@ static void * s_proc_thread_function(void * a_arg)
                     l_cur->callbacks.error_callback(l_cur, errno);
             }
             if (l_flag_read ){
-				int32_t l_bytes_read = 0;
+                int32_t l_bytes_read = 0;
                 switch (l_cur->type) {
                     case DESCRIPTOR_TYPE_QUEUE:
                         dap_events_socket_queue_proc_input_unsafe(l_cur);
@@ -867,17 +888,17 @@ static void * s_proc_thread_function(void * a_arg)
                 l_thread->poll[n].fd = -1;
                 l_poll_compress = true;
 #elif defined (DAP_EVENTS_CAPS_KQUEUE)
-		if (l_cur->socket != -1 ){
-		    struct kevent * l_event = &l_cur->kqueue_event;
-		    EV_SET(l_event, l_cur->socket, 0 ,EV_DELETE, 0,0,l_cur);
+        if (l_cur->socket != -1 ){
+            struct kevent * l_event = &l_cur->kqueue_event;
+            EV_SET(l_event, l_cur->socket, 0 ,EV_DELETE, 0,0,l_cur);
             if ( kevent( l_thread->kqueue_fd,l_event,1,NULL,0,NULL) != 1 ) {
                 int l_errno = errno;
                 char l_errbuf[128];
                 strerror_r(l_errno, l_errbuf, sizeof (l_errbuf));
                 log_it( L_ERROR,"Can't remove event socket's handler %d from the epoll_fd %d  \"%s\" (%d)", l_cur->socket,
-				l_thread->kqueue_fd, l_errbuf, l_errno);
+                l_thread->kqueue_fd, l_errbuf, l_errno);
             }
-		}
+        }
 
 #else
 #error "Unimplemented poll ctl analog for this platform"

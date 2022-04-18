@@ -53,14 +53,6 @@
 #define LOG_TAG "dap_enc_http"
 
 static dap_enc_acl_callback_t s_acl_callback = NULL;
-static dap_enc_acl_callback_t s_acl_params_callback = NULL;
-
-
-void dap_enc_http_set_acl_params_callback(dap_enc_acl_callback_t a_callback)
-{
-    s_acl_params_callback = a_callback;
-}
-
 
 int enc_http_init()
 {
@@ -122,7 +114,7 @@ void enc_http_proc(struct dap_http_simple *cl_st, void * arg)
             return;
         } else if (l_decode_len > l_pkey_exchange_size+ sizeof (dap_sign_hdr_t)) {
             dap_sign_t *l_sign = (dap_sign_t *)&alice_msg[l_pkey_exchange_size];
-            if (l_sign->header.sign_size == 0 || l_sign->header.sign_size > (l_decode_len - l_pkey_exchange_size)  ){
+            if(!dap_sign_verify_size(l_sign, l_decode_len - l_pkey_exchange_size)) {
                 log_it(L_WARNING,"Wrong signature size %u (decoded length %zu)",l_sign->header.sign_size, l_decode_len);
                 *return_code = Http_Status_BadRequest;
                 return;
@@ -144,7 +136,10 @@ void enc_http_proc(struct dap_http_simple *cl_st, void * arg)
             *return_code = Http_Status_BadRequest;
             return;
         }
-        l_pkey_exchange_key->gen_bob_shared_key(l_pkey_exchange_key, alice_msg, l_pkey_exchange_size, (void**)&l_pkey_exchange_key->pub_key_data);
+        if(l_pkey_exchange_key->gen_bob_shared_key) {
+            l_pkey_exchange_key->gen_bob_shared_key(l_pkey_exchange_key, alice_msg, l_pkey_exchange_size,
+                    (void**) &l_pkey_exchange_key->pub_key_data);
+        }
 
         dap_enc_ks_key_t * l_enc_key_ks = dap_enc_ks_new();
         if (s_acl_callback) {
@@ -152,15 +147,6 @@ void enc_http_proc(struct dap_http_simple *cl_st, void * arg)
         } else {
             log_it(L_DEBUG, "Callback for ACL is not set, pass anauthorized");
         }
-		if (s_acl_params_callback) {
-			if (!l_enc_key_ks->acl_bugreport)
-				l_enc_key_ks->acl_bugreport = s_acl_params_callback(&l_sign_hash);
-			else {
-				if (l_enc_key_ks->acl_bugreport[0] == false) {
-					l_enc_key_ks->acl_bugreport = s_acl_params_callback(&l_sign_hash);
-				}
-			}
-		}
 
         char encrypt_msg[DAP_ENC_BASE64_ENCODE_SIZE(l_pkey_exchange_key->pub_key_data_size) + 1];
         size_t encrypt_msg_size = dap_enc_base64_encode(l_pkey_exchange_key->pub_key_data, l_pkey_exchange_key->pub_key_data_size, encrypt_msg, DAP_ENC_DATA_TYPE_B64);
