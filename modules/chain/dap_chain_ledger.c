@@ -115,7 +115,7 @@ typedef struct dap_chain_ledger_tx_item {
     dap_chain_hash_fast_t tx_hash_fast;
     dap_chain_datum_tx_t *tx;
     struct {
-        time_t ts_created;
+        dap_time_t ts_created;
         int n_outs;
         int n_outs_used;
         char token_ticker[DAP_CHAIN_TICKER_SIZE_MAX];
@@ -309,8 +309,10 @@ struct json_object *wallet_info_json_collect(dap_ledger_t *a_ledger, dap_ledger_
     json_object_object_add(l_network, "name", json_object_new_string(a_ledger->net_name));
     char *pos = strrchr(a_bal->key, ' ');
     if (pos) {
-        char *l_addr_str = DAP_NEW_S_SIZE(char, pos - a_bal->key + 1);
+        size_t l_addr_len = pos - a_bal->key;
+        char *l_addr_str = DAP_NEW_S_SIZE(char, l_addr_len + 1);
         memcpy(l_addr_str, a_bal->key, pos - a_bal->key);
+        *(l_addr_str + l_addr_len) = '\0';
         json_object_object_add(l_network, "address", json_object_new_string(l_addr_str));
     } else {
         json_object_object_add(l_network, "address", json_object_new_string("Unknown"));
@@ -1257,7 +1259,8 @@ void dap_chain_ledger_load_cache(dap_ledger_t *a_ledger)
     for (size_t i = 0; i < l_objs_count; i++) {
         dap_chain_ledger_tx_spent_item_t *l_tx_spent_item = DAP_NEW_Z(dap_chain_ledger_tx_spent_item_t);
         dap_chain_hash_fast_from_str(l_objs[i].key, &l_tx_spent_item->tx_hash_fast);
-        strncpy(l_tx_spent_item->token_ticker, (char *)l_objs[i].value, DAP_CHAIN_TICKER_SIZE_MAX - 1);
+        strncpy(l_tx_spent_item->token_ticker, (char *)l_objs[i].value,
+                min(l_objs[i].value_len, DAP_CHAIN_TICKER_SIZE_MAX - 1));
         HASH_ADD(hh, l_ledger_pvt->spent_items, tx_hash_fast, sizeof(dap_chain_hash_fast_t), l_tx_spent_item);
     }
     dap_chain_global_db_objs_delete(l_objs, l_objs_count);
@@ -2905,7 +2908,7 @@ int dap_chain_ledger_tx_add(dap_ledger_t *a_ledger, dap_chain_datum_tx_t *a_tx, 
     memcpy(&l_tx_item->tx_hash_fast, a_tx_hash, sizeof(dap_chain_hash_fast_t));
     size_t l_tx_size = dap_chain_datum_tx_get_size(a_tx);
     l_tx_item->tx = DAP_DUP_SIZE(a_tx, l_tx_size);
-    l_tx_item->cache_data.ts_created = time(NULL); // Time of transasction added to ledger
+    l_tx_item->cache_data.ts_created = dap_time_now(); // Time of transasction added to ledger
     dap_list_t *l_tist_tmp = dap_chain_datum_tx_items_get(a_tx, TX_ITEM_TYPE_OUT_ALL, &l_tx_item->cache_data.n_outs);
     // If debug mode dump the UTXO
     if (dap_log_level_get() == L_DEBUG && s_debug_more) {
@@ -3203,7 +3206,7 @@ unsigned dap_chain_ledger_count(dap_ledger_t *a_ledger)
  * @param a_ts_to
  * @return
  */
-uint64_t dap_chain_ledger_count_from_to(dap_ledger_t * a_ledger, time_t a_ts_from, time_t a_ts_to )
+uint64_t dap_chain_ledger_count_from_to(dap_ledger_t * a_ledger, dap_time_t a_ts_from, dap_time_t a_ts_to)
 {
     uint64_t l_ret = 0;
     dap_ledger_private_t *l_ledger_priv = PVT(a_ledger);

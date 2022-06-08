@@ -143,6 +143,7 @@ dap_chain_t * dap_chain_create(dap_ledger_t* a_ledger, const char * a_chain_net_
     l_ret->name = strdup (a_chain_name);
     l_ret->net_name = strdup (a_chain_net_name);
     l_ret->ledger = a_ledger;
+    pthread_rwlock_init(&l_ret->rwlock, NULL);
     pthread_rwlock_init(&l_ret->atoms_rwlock,NULL);
     pthread_rwlock_init(&l_ret->cell_rwlock,NULL);
 
@@ -193,6 +194,7 @@ void dap_chain_delete(dap_chain_t * a_chain)
     DAP_DELETE(a_chain->datum_types);
     a_chain->autoproc_datum_types_count = 0;
     DAP_DELETE(a_chain->autoproc_datum_types);
+    pthread_rwlock_destroy(&a_chain->rwlock);
     pthread_rwlock_destroy(&a_chain->atoms_rwlock);
     pthread_rwlock_destroy(&a_chain->cell_rwlock);
     pthread_rwlock_unlock(&s_chain_items_rwlock);
@@ -415,14 +417,12 @@ dap_chain_t * dap_chain_load_from_cfg(dap_ledger_t* a_ledger, const char * a_cha
             }
             // add datum types
             if(l_chain && l_datum_types && l_datum_types_count) {
-                l_chain->autoproc_datum_types = DAP_NEW_SIZE(uint16_t, l_datum_types_count * sizeof(uint16_t));
+                l_chain->autoproc_datum_types = DAP_NEW_Z_SIZE(uint16_t, l_chain->datum_types_count * sizeof(uint16_t));
                 uint16_t l_count_recognized = 0;
                 for(uint16_t i = 0; i < l_datum_types_count; i++) {
                     if (!strcmp(l_datum_types[i], "all") && l_chain->datum_types_count) {
-                        l_chain->autoproc_datum_types = DAP_REALLOC(l_chain->autoproc_datum_types, l_chain->datum_types_count * sizeof(uint16_t));
-                        for (int j = 0; j < l_chain->datum_types_count; j++) {
+                        for (int j = 0; j < l_chain->datum_types_count; j++)
                             l_chain->autoproc_datum_types[j] = s_chain_type_convert(l_chain->datum_types[j]);
-                        }
                         l_count_recognized = l_chain->datum_types_count;
                         break;
                     }
@@ -550,11 +550,27 @@ void dap_chain_info_dump_log(dap_chain_t * a_chain)
  */
 void dap_chain_add_callback_notify(dap_chain_t * a_chain, dap_chain_callback_notify_t a_callback, void * a_callback_arg)
 {
-    if(!a_chain)
+    if(!a_chain){
+        log_it(L_ERROR, "NULL chain passed to dap_chain_add_callback_notify()");
         return;
-    a_chain->callback_notify = a_callback;
-    a_chain->callback_notify_arg = a_callback_arg;
+    }
+    if(!a_callback){
+        log_it(L_ERROR, "NULL callback passed to dap_chain_add_callback_notify()");
+        return;
+    }
+    dap_chain_atom_notifier_t * l_notifier = DAP_NEW_Z(dap_chain_atom_notifier_t);
+    if (l_notifier == NULL){
+        log_it(L_ERROR, "Can't allocate memory for notifier in dap_chain_add_callback_notify()");
+        return;
+    }
+
+    l_notifier->callback = a_callback;
+    l_notifier->arg = a_callback_arg;
+    pthread_rwlock_wrlock(&a_chain->rwlock);
+    a_chain->atom_notifiers = dap_list_append(a_chain->atom_notifiers, l_notifier);
+    pthread_rwlock_unlock(&a_chain->rwlock);
 }
+
 
 /**
  * @brief dap_chain_get_last_atom_hash

@@ -1,6 +1,5 @@
 #include <string.h>
 #include <stdlib.h>
-#include <time.h>
 
 #include "dap_chain_global_db.h"
 #include "dap_chain_global_db_remote.h"
@@ -8,6 +7,7 @@
 #include "dap_strfuncs.h"
 #include "dap_string.h"
 #include "dap_chain.h"
+#include "dap_time.h"
 
 #define LOG_TAG "dap_chain_global_db_remote"
 
@@ -40,8 +40,8 @@ uint64_t dap_db_log_get_group_last_id(const char *a_group_name)
 static void *s_list_thread_proc(void *arg)
 {
     dap_db_log_list_t *l_dap_db_log_list = (dap_db_log_list_t *)arg;
-    uint32_t l_time_store_lim = dap_config_get_item_uint32_default(g_config, "resources", "dap_global_db_time_store_limit", 72);
-    uint64_t l_limit_time = l_time_store_lim ? (uint64_t)time(NULL) - l_time_store_lim * 3600 : 0;
+    uint32_t l_time_store_lim_hours = dap_config_get_item_uint32_default(g_config, "resources", "dap_global_db_time_store_limit", 72);
+    uint64_t l_limit_time = l_time_store_lim_hours ? dap_gdb_time_now() - dap_gdb_time_from_sec(l_time_store_lim_hours * 3600) : 0;
     for (dap_list_t *l_groups = l_dap_db_log_list->groups; l_groups; l_groups = dap_list_next(l_groups)) {
         dap_db_log_list_group_t *l_group_cur = (dap_db_log_list_group_t *)l_groups->data;
         char *l_del_group_name_replace = NULL;
@@ -56,6 +56,7 @@ static void *s_list_thread_proc(void *arg)
             l_obj_type = DAP_DB$K_OPTYPE_ADD;
         }
         uint64_t l_item_start = l_group_cur->last_id_synced + 1;
+        dap_gdb_time_t l_time_now = dap_gdb_time_now();
         while (l_group_cur->count && l_dap_db_log_list->is_process) { // Number of records to be synchronized
             size_t l_item_count = min(64, l_group_cur->count);
             dap_store_obj_t *l_objs = dap_chain_global_db_cond_load(l_group_cur->name, l_item_start, &l_item_count);
@@ -70,7 +71,15 @@ static void *s_list_thread_proc(void *arg)
             dap_list_t *l_list = NULL;
             for (size_t i = 0; i < l_item_count; i++) {
                 dap_store_obj_t *l_obj_cur = l_objs + i;
+                if (!l_obj_cur)
+                    continue;
                 l_obj_cur->type = l_obj_type;
+                if (l_obj_cur->timestamp >> 32 == 0 ||
+                        l_obj_cur->timestamp > l_time_now ||
+                        l_obj_cur->group == NULL) {
+                    dap_chain_global_db_driver_delete(l_obj_cur, 1);
+                    continue;       // the object is broken
+                }
                 if (l_obj_type == DAP_DB$K_OPTYPE_DEL) {
                     if (l_limit_time && l_obj_cur->timestamp < l_limit_time) {
                         dap_chain_global_db_driver_delete(l_obj_cur, 1);
@@ -135,7 +144,6 @@ dap_db_log_list_t* dap_db_log_list_start(dap_chain_net_t *l_net, dap_chain_node_
     if (a_flags & F_DB_LOG_ADD_EXTRA_GROUPS) {
         dap_list_t *l_extra_groups_masks = dap_chain_db_get_sync_extra_groups(l_net_name);
         l_groups_masks = dap_list_concat(l_groups_masks, l_extra_groups_masks);
-        dap_list_free(l_extra_groups_masks);
     }
     dap_list_t *l_groups_names = NULL;
     for (dap_list_t *l_cur_mask = l_groups_masks; l_cur_mask; l_cur_mask = dap_list_next(l_cur_mask)) {
@@ -144,22 +152,23 @@ dap_db_log_list_t* dap_db_log_list_start(dap_chain_net_t *l_net, dap_chain_node_
     }
     dap_list_free(l_groups_masks);
 
-    static uint16_t s_size_ban_list = 0;
+    static int16_t s_size_ban_list = -1;
     static char **s_ban_list = NULL;
 
-    static uint16_t s_size_white_list = 0;
+    static int16_t s_size_white_list = -1;
     static char **s_white_list = NULL;
+    static char **s_white_list_del = NULL;
 
-    static bool l_try_read_ban_list = false;
-    static bool l_try_read_white_list = false;
-
-    if (!l_try_read_ban_list) {
-            s_ban_list = dap_config_get_array_str(g_config, "stream_ch_chain", "ban_list_sync_groups", &s_size_ban_list);
-            l_try_read_ban_list = true;
-    }
-    if (!l_try_read_white_list) {
-            s_white_list = dap_config_get_array_str(g_config, "stream_ch_chain", "white_list_sync_groups", &s_size_white_list);
-            l_try_read_white_list = true;
+    if (s_size_ban_list == -1)
+        s_ban_list = dap_config_get_array_str(g_config, "stream_ch_chain", "ban_list_sync_groups", (uint16_t *)&s_size_ban_list);
+    if (s_size_white_list == -1) {
+        s_white_list = dap_config_get_array_str(g_config, "stream_ch_chain", "white_list_sync_groups", (uint16_t *)&s_size_white_list);
+        if (s_size_white_list > 0) {
+            s_white_list_del = DAP_NEW_SIZE(char *, s_size_white_list * sizeof(char *));
+            for (int i = 0; i < s_size_white_list; i++) {
+                s_white_list_del[i] = dap_strdup_printf("%s.del", s_white_list[i]);
+            }
+        }
     }
 
     /* delete if not condition */
@@ -167,17 +176,18 @@ dap_db_log_list_t* dap_db_log_list_start(dap_chain_net_t *l_net, dap_chain_node_
         for (dap_list_t *l_group = l_groups_names; l_group; ) {
             bool l_found = false;
             for (int i = 0; i < s_size_white_list; i++) {
-                if (!dap_fnmatch(s_white_list[i], l_group->data, FNM_NOESCAPE)) {
+                if (!dap_fnmatch(s_white_list[i], l_group->data, FNM_NOESCAPE) ||
+                        !dap_fnmatch(s_white_list_del[i], l_group->data, FNM_NOESCAPE)) {
                     l_found = true;
                     break;
                 }
             }
             if (!l_found) {
-                    dap_list_t *l_tmp = l_group->next;
-                    l_groups_names = dap_list_delete_link(l_dap_db_log_list->groups, l_group);
-                    l_group = l_tmp;
-            }
-            l_group = dap_list_next(l_group);
+                dap_list_t *l_tmp = l_group->next;
+                l_groups_names = dap_list_delete_link(l_groups_names, l_group);
+                l_group = l_tmp;
+            } else
+                l_group = dap_list_next(l_group);
         }
     } else if (s_size_ban_list > 0) {
         for (dap_list_t *l_group = l_groups_names; l_group; ) {
@@ -357,11 +367,11 @@ bool dap_db_set_cur_node_addr(uint64_t a_address, char *a_net_name )
 }
 
 /**
- * @brief Sets an adress of a current node and expire time.
+ * @brief Sets an address of a current node and expire time.
  *
- * @param a_address an adress of a current node
+ * @param a_address an address of a current node
  * @param a_net_name a net name string
- * @return Returns true if siccessful, otherwise false
+ * @return Returns true if successful, otherwise false
  */
 bool dap_db_set_cur_node_addr_exp(uint64_t a_address, char *a_net_name )
 {
@@ -629,9 +639,8 @@ dap_store_obj_t *dap_store_unpacket_multiple(const dap_store_obj_pkt_t *a_pkt, s
         l_offset += sizeof(uint16_t);
 
         if (l_offset + l_str_length > a_pkt->data_size || !l_str_length) {log_it(L_ERROR, "Broken GDB element: can't read 'group' field"); break;} // Check for buffer boundries
-        l_obj->group = DAP_NEW_SIZE(char, l_str_length + 1);
+        l_obj->group = DAP_NEW_Z_SIZE(char, l_str_length + 1);
         memcpy(l_obj->group, a_pkt->data + l_offset, l_str_length);
-        l_obj->group[l_str_length] = '\0';
         l_offset += l_str_length;
 
         if (l_offset+sizeof (uint64_t)> a_pkt->data_size) {log_it(L_ERROR, "Broken GDB element: can't read 'id' field");
@@ -649,11 +658,11 @@ dap_store_obj_t *dap_store_unpacket_multiple(const dap_store_obj_pkt_t *a_pkt, s
         memcpy(&l_str_length, a_pkt->data + l_offset, sizeof(uint16_t));
         l_offset += sizeof(uint16_t);
 
-        if (l_offset + l_str_length > a_pkt->data_size || !l_str_length) {log_it(L_ERROR, "Broken GDB element: can't read 'key' field");
+        if (l_offset + l_str_length > a_pkt->data_size || !l_str_length) {log_it(L_ERROR, "Broken GDB element: can't read 'key' field: len %s",
+                                                                                 l_str_length ? "OVER" : "NULL");
                                                                           DAP_DELETE(l_obj->group); break;} // Check for buffer boundries
-        l_obj->key = DAP_NEW_SIZE(char, l_str_length + 1);
+        l_obj->key = DAP_NEW_Z_SIZE(char, l_str_length + 1);
         memcpy((char *)l_obj->key, a_pkt->data + l_offset, l_str_length);
-        ((char *)l_obj->key)[l_str_length] = '\0';
         l_offset += l_str_length;
 
         if (l_offset+sizeof (uint64_t)> a_pkt->data_size) {log_it(L_ERROR, "Broken GDB element: can't read 'value_length' field");

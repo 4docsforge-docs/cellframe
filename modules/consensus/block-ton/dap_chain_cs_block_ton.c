@@ -166,7 +166,7 @@ static int s_callback_new(dap_chain_t *a_chain, dap_config_t *a_chain_cfg) {
 	    l_ton_pvt->poa_validators_count = l_node_addrs_count;
 	    for(size_t i = 0; i < l_node_addrs_count; i++) {
 	        dap_chain_node_addr_t *l_node_addr = DAP_NEW_Z(dap_chain_node_addr_t);
-	        if (sscanf(l_addrs[i],NODE_ADDR_FP_STR, NODE_ADDR_FPS_ARGS(l_node_addr) ) != 4 ){
+            if (dap_sscanf(l_addrs[i],NODE_ADDR_FP_STR, NODE_ADDR_FPS_ARGS(l_node_addr) ) != 4 ){
 	            log_it(L_ERROR,"TON: Wrong address format,  should be like 0123::4567::890AB::CDEF");
 	            DAP_DELETE(l_node_addr);
 	            //DAP_DELETE(l_node_info);
@@ -324,7 +324,7 @@ static int s_callback_created(dap_chain_t *a_chain, dap_config_t *a_chain_net_cf
 	l_session->state = DAP_STREAM_CH_CHAIN_SESSION_STATE_IDLE;
 	l_session->time_proc_lock = false;
 	
-	dap_chain_time_t l_time = (dap_chain_time_t)time(NULL);
+	dap_time_t l_time = dap_time_now();
 	while (true) {
 		l_time++;
 		if ( (l_time % PVT(l_session->ton)->round_start_multiple_of) == 0) {
@@ -336,15 +336,19 @@ static int s_callback_created(dap_chain_t *a_chain, dap_config_t *a_chain_net_cf
 
 	log_it(L_INFO, "TON: init session for net:%s, chain:%s", a_chain->net_name, a_chain->name);
 	DL_APPEND(s_session_items, l_session);
-	if ( s_session_get_validator(l_session, l_session->my_addr, l_session->cur_round.validators_list) ) {
-		if (!s_session_cs_timer) {
-			s_session_cs_timer = dap_timerfd_start(1*1000, 
-	                        (dap_timerfd_callback_t)s_session_timer, 
-	                        NULL);
-			if (PVT(l_session->ton)->debug)
-				log_it(L_MSG, "TON: Consensus main timer is started");
+    dap_chain_node_role_t l_role = dap_chain_net_get_role(l_net);
+    if ( PVT(l_session->ton)->validators_list_by_stake ||
+                    (l_role.enums == NODE_ROLE_MASTER || l_role.enums == NODE_ROLE_ROOT) ) {
+		if ( s_session_get_validator(l_session, l_session->my_addr, l_session->cur_round.validators_list) ) {
+			if (!s_session_cs_timer) {
+				s_session_cs_timer = dap_timerfd_start(1*1000, 
+		                        (dap_timerfd_callback_t)s_session_timer, 
+		                        NULL);
+				if (PVT(l_session->ton)->debug)
+					log_it(L_MSG, "TON: Consensus main timer is started");
+			}
+			dap_stream_ch_chain_voting_in_callback_add(l_session, s_session_packet_in);
 		}
-		dap_stream_ch_chain_voting_in_callback_add(l_session, s_session_packet_in);
 	}
 	return 0;
 }
@@ -368,8 +372,32 @@ static void s_session_round_start(dap_chain_cs_block_ton_items_t *a_session) {
 	a_session->cur_round.messages_count = 0;
 	a_session->cur_round.submit = false;
 
-	a_session->ts_round_sync_start = (dap_chain_time_t)time(NULL);
+	a_session->ts_round_sync_start = dap_time_now();
 	a_session->cur_round.id.uint64++;
+
+    size_t l_objs_size = 0;
+    dap_global_db_obj_t *l_objs = dap_chain_global_db_gr_load(a_session->gdb_group_store, &l_objs_size);
+    if (l_objs_size) {
+    	dap_chain_cs_block_ton_store_t *l_store_candidate_ready = NULL;
+    	size_t l_candidate_ready_size = 0;
+        for (size_t i = 0; i < l_objs_size; i++) {
+            if (!l_objs[i].value_len)
+                continue;
+            dap_chain_cs_block_ton_store_t *l_store = 
+										(dap_chain_cs_block_ton_store_t *)l_objs[i].value;
+			if ( l_store->hdr.round_id.uint64 != a_session->cur_round.id.uint64 ) {
+				// dap_chain_global_db_gr_del(dap_strdup(l_objs[i].key), a_session->gdb_group_store);
+				if ( l_store->hdr.sign_collected ) {
+					l_store_candidate_ready = l_store;
+				}
+			}
+        }
+        if (l_store_candidate_ready) {
+        	s_session_candidate_to_chain(a_session, &l_store_candidate_ready->hdr.candidate_hash, 
+        					(dap_chain_block_t*)l_store_candidate_ready->candidate_n_signs, l_store_candidate_ready->hdr.candidate_size);
+        }
+        dap_chain_global_db_objs_delete(l_objs, l_objs_size);
+    }
 }
 
 static bool s_session_send_startsync(dap_chain_cs_block_ton_items_t *a_session){
@@ -406,7 +434,7 @@ static bool s_session_send_votefor(s_session_send_votefor_data_t *a_data){
 }
 
 static bool s_session_timer() {
-	dap_chain_time_t l_time = (dap_chain_time_t)time(NULL);
+	dap_time_t l_time = dap_time_now();
 	dap_chain_cs_block_ton_items_t *l_session = NULL;
 	DL_FOREACH(s_session_items, l_session) {
 		if ( l_session->time_proc_lock ) {
@@ -501,7 +529,7 @@ static bool s_session_timer() {
 					if ( l_my_number != -1 ) {
 						l_my_number++;
 						if ( (l_time-l_session->ts_round_start) >=
-									(dap_chain_time_t)((PVT(l_session->ton)->next_candidate_delay*l_my_number)+PVT(l_session->ton)->first_message_delay) ) {
+									(dap_time_t)((PVT(l_session->ton)->next_candidate_delay*l_my_number)+PVT(l_session->ton)->first_message_delay) ) {
 							l_session->cur_round.submit = true;
 							s_session_candidate_submit(l_session);
 						}
@@ -509,7 +537,7 @@ static bool s_session_timer() {
 				}
 
 				if ( (l_time-l_session->ts_round_start) >=
-							(dap_chain_time_t)(PVT(l_session->ton)->round_attempt_duration*l_session->attempt_current_number) ) {
+							(dap_time_t)(PVT(l_session->ton)->round_attempt_duration*l_session->attempt_current_number) ) {
 
 					l_session->attempt_current_number++;
 					if ( l_session->attempt_current_number > PVT(l_session->ton)->round_attempts_max ) {
@@ -708,22 +736,38 @@ static void s_session_candidate_to_chain(
 
 static bool s_session_candidate_submit(dap_chain_cs_block_ton_items_t *a_session){
     
-    if (!a_session->my_candidate 
-    		|| a_session->my_candidate_attempts_count 
-    				>= PVT(a_session->ton)->my_candidate_attempts_max) {
-		dap_chain_t *l_chain = a_session->chain;
-    	dap_chain_cs_blocks_t *l_blocks = DAP_CHAIN_CS_BLOCKS(l_chain);
-    	s_session_my_candidate_delete(a_session);
-    	if ( l_blocks->block_new_size && l_blocks->block_new) {
-    		a_session->my_candidate = (dap_chain_block_t *)DAP_DUP_SIZE(l_blocks->block_new, l_blocks->block_new_size);
-    		a_session->my_candidate_size = l_blocks->block_new_size;
-    		s_session_block_new_delete(a_session);
-    	}
-    }
+	// if (!a_session->my_candidate 
+	// 		|| a_session->my_candidate_attempts_count 
+	// 			>= PVT(a_session->ton)->my_candidate_attempts_max) {
+	// 	dap_chain_t *l_chain = a_session->chain;
+	// 	dap_chain_cs_blocks_t *l_blocks = DAP_CHAIN_CS_BLOCKS(l_chain);
+	// 	s_session_my_candidate_delete(a_session);
+	// 	if ( l_blocks->block_new_size && l_blocks->block_new) {
+	// 		a_session->my_candidate = (dap_chain_block_t *)DAP_DUP_SIZE(l_blocks->block_new, l_blocks->block_new_size);
+	// 		a_session->my_candidate_size = l_blocks->block_new_size;
+	// 		s_session_block_new_delete(a_session);
+	// 	}
+	// }
+	
+	dap_chain_t *l_chain = a_session->chain;
+	dap_chain_cs_blocks_t *l_blocks = DAP_CHAIN_CS_BLOCKS(l_chain);
+	s_session_my_candidate_delete(a_session);
+	dap_chain_cs_new_block_add_datums(l_chain); // add new datums from queue
+	if ( l_blocks->block_new_size && l_blocks->block_new) {
+		a_session->my_candidate = (dap_chain_block_t *)DAP_DUP_SIZE(l_blocks->block_new, l_blocks->block_new_size);
+		a_session->my_candidate_size = l_blocks->block_new_size;
+		s_session_block_new_delete(a_session);
+	}
 
 	size_t l_submit_size = a_session->my_candidate ? 
 				sizeof(dap_chain_cs_block_ton_message_submit_t)+a_session->my_candidate_size
-				: sizeof(dap_chain_cs_block_ton_message_submit_t);
+					: sizeof(dap_chain_cs_block_ton_message_submit_t);
+	
+	// dap_chain_cs_new_block_add_datums(dap_chain_t *a_chain);
+	// size_t l_submit_size = l_blocks->block_new ? 
+	// 			sizeof(dap_chain_cs_block_ton_message_submit_t)+a_session->my_candidate_size
+	// 				: sizeof(dap_chain_cs_block_ton_message_submit_t);
+
 	dap_chain_cs_block_ton_message_submit_t *l_submit =
 							DAP_NEW_SIZE(dap_chain_cs_block_ton_message_submit_t, l_submit_size);
 	l_submit->round_id.uint64 = a_session->cur_round.id.uint64;
@@ -816,7 +860,7 @@ static bool s_hash_is_null(dap_chain_hash_fast_t *a_hash){
 static bool s_session_round_finish(dap_chain_cs_block_ton_items_t *a_session) {
 
 	a_session->state = DAP_STREAM_CH_CHAIN_SESSION_STATE_IDLE;
-	a_session->ts_round_finish = (dap_chain_time_t)time(NULL);
+	a_session->ts_round_finish = dap_time_now();
 
     size_t l_objs_size = 0;
     dap_global_db_obj_t *l_objs = dap_chain_global_db_gr_load(a_session->gdb_group_store, &l_objs_size);
@@ -860,10 +904,10 @@ static bool s_session_round_finish(dap_chain_cs_block_ton_items_t *a_session) {
 				}
 			}
         }
-        if (l_store_candidate_ready) {
-        	s_session_candidate_to_chain(a_session, &l_store_candidate_ready->hdr.candidate_hash, 
-        					(dap_chain_block_t*)l_store_candidate_ready->candidate_n_signs, l_store_candidate_ready->hdr.candidate_size);
-        }
+        // if (l_store_candidate_ready) {
+        // 	s_session_candidate_to_chain(a_session, &l_store_candidate_ready->hdr.candidate_hash, 
+        // 					(dap_chain_block_t*)l_store_candidate_ready->candidate_n_signs, l_store_candidate_ready->hdr.candidate_size);
+        // }
         dap_chain_global_db_objs_delete(l_objs, l_objs_size);
     }
 
@@ -1022,10 +1066,10 @@ static void s_session_packet_in(void *a_arg, dap_chain_node_addr_t *a_sender_nod
     	goto handler_finish;
     }
 
-    dap_chain_time_t l_time = (dap_chain_time_t)time(NULL);
+    dap_time_t l_time = dap_time_now();
 	l_message->hdr.is_verified=false;
 
-    dap_chain_hash_fast_t l_data_hash;
+    dap_chain_hash_fast_t l_data_hash = {};
     dap_hash_fast(a_data, a_data_size, &l_data_hash);
     if (memcmp(a_data_hash, &l_data_hash, sizeof(dap_chain_hash_fast_t)) != 0) {
 		if (PVT(l_session->ton)->debug)
@@ -1505,24 +1549,32 @@ static void s_session_packet_in(void *a_arg, dap_chain_node_addr_t *a_sender_nod
 						dap_chain_cs_block_ton_store_t *l_store = 
 												(dap_chain_cs_block_ton_store_t *)dap_chain_global_db_gr_get(
 														l_candidate_hash_str, &l_store_size, l_session->gdb_group_store);
-						if (l_store) {
+						if (l_store && !l_store->hdr.approve_collected) {
+							if (PVT(l_session->ton)->debug)
+								log_it(L_MSG, "TON: APPROVE: candidate found in store:%s & !approve_collected", l_candidate_hash_str);
 							l_store->hdr.approve_collected = true;
 							if (dap_chain_global_db_gr_set(dap_strdup(l_candidate_hash_str), l_store,
-																l_store_size, l_session->gdb_group_store) ) {
-								// event Vote
-								dap_chain_cs_block_ton_message_vote_t *l_vote =
-																	DAP_NEW_Z(dap_chain_cs_block_ton_message_vote_t);
-								l_vote->round_id.uint64 = l_session->cur_round.id.uint64;
-								memcpy(&l_vote->candidate_hash, l_candidate_hash, sizeof(dap_chain_hash_fast_t));
-								l_vote->attempt_number = l_session->attempt_current_number;
-								s_message_send(l_session, DAP_STREAM_CH_CHAIN_MESSAGE_TYPE_VOTE, (uint8_t*)l_vote,
-									sizeof(dap_chain_cs_block_ton_message_vote_t), l_session->cur_round.validators_start);
-								DAP_DELETE(l_vote);
+                                                                l_store_size, l_session->gdb_group_store) ) {
 								if (PVT(l_session->ton)->debug)
-                                    log_it(L_MSG, "TON: net:%s, chain:%s, round:%"DAP_UINT64_FORMAT_U", attempt:%hu This is first attempt, so to sent a VOTE for candidate:%s",
-											l_session->chain->net_name, l_session->chain->name, l_session->cur_round.id.uint64,
-												l_session->attempt_current_number, l_candidate_hash_str );
-							}
+									log_it(L_MSG, "TON: APPROVE: candidate update:%s approve_collected=true", l_candidate_hash_str);
+                            } else
+								if (PVT(l_session->ton)->debug)
+									log_it(L_MSG, "TON: APPROVE: can`t update candidate:%s", l_candidate_hash_str);
+
+							// event Vote
+							dap_chain_cs_block_ton_message_vote_t *l_vote =
+																DAP_NEW_Z(dap_chain_cs_block_ton_message_vote_t);
+							l_vote->round_id.uint64 = l_session->cur_round.id.uint64;
+							memcpy(&l_vote->candidate_hash, l_candidate_hash, sizeof(dap_chain_hash_fast_t));
+							l_vote->attempt_number = l_session->attempt_current_number;
+							s_message_send(l_session, DAP_STREAM_CH_CHAIN_MESSAGE_TYPE_VOTE, (uint8_t*)l_vote,
+								sizeof(dap_chain_cs_block_ton_message_vote_t), l_session->cur_round.validators_start);
+							DAP_DELETE(l_vote);
+							if (PVT(l_session->ton)->debug)
+                                log_it(L_MSG, "TON: net:%s, chain:%s, round:%"DAP_UINT64_FORMAT_U", attempt:%hu This is first attempt, so to sent a VOTE for candidate:%s",
+										l_session->chain->net_name, l_session->chain->name, l_session->cur_round.id.uint64,
+											l_session->attempt_current_number, l_candidate_hash_str );
+
 							DAP_DELETE(l_store);
 						}
 					}
@@ -1769,7 +1821,7 @@ static void s_session_packet_in(void *a_arg, dap_chain_node_addr_t *a_sender_nod
 							DAP_DELETE(l_candidate_sign);
 							
 							l_session->state = DAP_STREAM_CH_CHAIN_SESSION_STATE_WAIT_SIGNS;
-							l_session->ts_round_state_commit = (dap_chain_time_t)time(NULL);
+							l_session->ts_round_state_commit = dap_time_now();
 							
 							if (PVT(l_session->ton)->debug)
                                 log_it(L_MSG, "TON: net:%s, chain:%s, round:%"DAP_UINT64_FORMAT_U" attempt:%hu Candidate:%s collected PRE_COMMIT more than 2/3 of the validators, so to sent a COMMIT_SIGN",
@@ -1905,7 +1957,7 @@ static void s_message_send(dap_chain_cs_block_ton_items_t *a_session, uint8_t a_
 						DAP_NEW_SIZE(dap_chain_cs_block_ton_message_t, l_message_size);
 	l_message->hdr.id.uint64 = (uint64_t)a_session->cur_round.messages_count;
 	l_message->hdr.chain_id.uint64 = a_session->chain->id.uint64;
-	l_message->hdr.ts_created = (dap_chain_time_t)time(NULL);
+	l_message->hdr.ts_created = dap_time_now();
 	l_message->hdr.type = a_message_type;
 	memcpy(&l_message->hdr.sender_node_addr,
 				dap_chain_net_get_cur_addr(l_net), sizeof(dap_chain_node_addr_t));

@@ -141,11 +141,16 @@ static void s_callback_channel_pkt_free_unsafe(uint64_t a_node_addr_uint64) {
 		if ( l_pkt_addr->node_addr.uint64 == a_node_addr_uint64) {
 			DAP_DELETE(l_pkt_addr->voting_pkt);
 			DAP_DELETE(l_pkt_addr);
-			s_pkt_items->pkts_out = dap_list_remove_link(s_pkt_items->pkts_out, l_list);
+			dap_list_t *l_tmp = l_list->next;
+			s_pkt_items->pkts_out = dap_list_delete_link(s_pkt_items->pkts_out, l_list);
+			// dap_list_t *l_list = dap_list_first(s_pkt_items->pkts_out);
+			l_list = l_tmp;
+    	} else {
+    		l_list = l_list->next;
     	}
-    	l_list = l_list->next;
     }
 }
+
 
 // remove overflow in outbuf
 static void s_callback_channel_pkt_buf_limit(uint64_t a_node_addr_uint64) {
@@ -231,7 +236,7 @@ void dap_stream_ch_chain_voting_pkt_broadcast(dap_chain_net_t *a_net, dap_list_t
 	            }
 	        }
 
-			s_callback_channel_pkt_free_unsafe(l_remote_node_addr->uint64);
+            //s_callback_channel_pkt_free_unsafe(l_remote_node_addr->uint64);
 			dap_list_t* l_pkts_list_temp = dap_list_first(s_pkt_items->pkts_out);
 			while(l_pkts_list_temp) {
 				dap_list_t *l_pkts_list = l_pkts_list_temp;
@@ -252,7 +257,10 @@ void dap_stream_ch_chain_voting_pkt_broadcast(dap_chain_net_t *a_net, dap_list_t
             }
 
 			if ( l_remote_node_addr->uint64 != dap_chain_net_get_cur_addr_int(a_net) ) {
-	            dap_client_go_stage(l_node_item->node_client->client, STAGE_STREAM_STREAMING, s_callback_send_all_unsafe);
+                if (dap_client_get_stage(l_node_item->node_client->client) != STAGE_STREAM_STREAMING)
+                    dap_client_go_stage(l_node_item->node_client->client, STAGE_STREAM_STREAMING, s_callback_send_all_unsafe);
+                else
+                    s_callback_send_all_unsafe(l_node_item->node_client->client, NULL);
 	        } else {
 	        	s_callback_send_all_loopback(l_remote_node_addr);
 	        }
@@ -278,7 +286,7 @@ static void s_callback_send_all_loopback(dap_chain_node_addr_t *a_remote_node_ad
 		}
 		l_pkts_list = l_pkts_list_next;
 	}
-	s_callback_channel_pkt_free_unsafe(a_remote_node_addr->uint64);
+    s_callback_channel_pkt_free_unsafe(a_remote_node_addr->uint64);
 	pthread_rwlock_unlock(&s_pkt_items->rwlock_out);
 }
 
@@ -288,24 +296,26 @@ static void s_callback_send_all_unsafe(dap_client_t *a_client, void *a_arg){
     dap_chain_node_client_t *l_node_client = DAP_CHAIN_NODE_CLIENT(a_client);
     if (l_node_client) {
 	    dap_stream_ch_t * l_ch_chain = dap_client_get_stream_ch_unsafe(a_client, dap_stream_ch_chain_voting_get_id() );
-	    dap_list_t* l_pkts_list = dap_list_first(s_pkt_items->pkts_out);
-		while(l_pkts_list) {
-			dap_list_t *l_pkts_list_next = l_pkts_list->next;
-			voting_pkt_addr_t *l_pkt_addr = (voting_pkt_addr_t *)l_pkts_list->data;
-			dap_stream_ch_chain_voting_pkt_t * l_voting_pkt = l_pkt_addr->voting_pkt;
-		    size_t l_voting_pkt_size = sizeof(l_voting_pkt->hdr) + l_voting_pkt->hdr.data_size;
-			if ( l_pkt_addr->node_addr.uint64 == l_node_client->remote_node_addr.uint64 ) {
-				if (l_ch_chain) {
-		    		dap_stream_ch_pkt_write_unsafe(l_ch_chain, 
-		    						l_voting_pkt->hdr.pkt_type, l_voting_pkt, l_voting_pkt_size);
+	    if (l_ch_chain) {
+		    dap_list_t* l_pkts_list = dap_list_first(s_pkt_items->pkts_out);
+			while(l_pkts_list) {
+				dap_list_t *l_pkts_list_next = l_pkts_list->next;
+				voting_pkt_addr_t *l_pkt_addr = (voting_pkt_addr_t *)l_pkts_list->data;
+				dap_stream_ch_chain_voting_pkt_t * l_voting_pkt = l_pkt_addr->voting_pkt;
+			    size_t l_voting_pkt_size = sizeof(l_voting_pkt->hdr) + l_voting_pkt->hdr.data_size;
+				if ( l_pkt_addr->node_addr.uint64 == l_node_client->remote_node_addr.uint64 ) {
+					if (l_ch_chain) {
+			    		dap_stream_ch_pkt_write_unsafe(l_ch_chain, 
+			    						l_voting_pkt->hdr.pkt_type, l_voting_pkt, l_voting_pkt_size);
+			    	}
+			    	else {
+						//printf("---!!! s_callback_send_all_unsafe() l_ch_chain in null \n");
+			    	}
 		    	}
-		    	else {
-					//printf("---!!! s_callback_send_all_unsafe() l_ch_chain in null \n");
-		    	}
-	    	}
-	    	l_pkts_list = l_pkts_list_next;
+		    	l_pkts_list = l_pkts_list_next;
+		    }
+	        s_callback_channel_pkt_free_unsafe(l_node_client->remote_node_addr.uint64);
 	    }
-		s_callback_channel_pkt_free_unsafe(l_node_client->remote_node_addr.uint64);
 	}
     pthread_rwlock_unlock(&s_pkt_items->rwlock_out);
 }
@@ -335,12 +345,11 @@ static void s_stream_ch_delete(dap_stream_ch_t* a_ch, void* a_arg) {
 static bool s_packet_in_callback_handler(void *a_arg)
 {
     UNUSED(a_arg);
+	pthread_rwlock_rdlock(&s_pkt_items->rwlock_in);
 	if (dap_list_length(s_pkt_items->pkts_in)) {
-		pthread_rwlock_rdlock(&s_pkt_items->rwlock_in);
 		dap_list_t* l_list_pkts = dap_list_copy(s_pkt_items->pkts_in);
 	    dap_list_free(s_pkt_items->pkts_in);
 	    s_pkt_items->pkts_in = NULL;
-		pthread_rwlock_unlock(&s_pkt_items->rwlock_in);
 
 		dap_list_t* l_list_temp = dap_list_first(l_list_pkts);
 		while(l_list_temp) {
@@ -369,6 +378,7 @@ static bool s_packet_in_callback_handler(void *a_arg)
 		}
 		dap_list_free(l_list_pkts);
 	}
+	pthread_rwlock_unlock(&s_pkt_items->rwlock_in);
 	return true;
 }
 

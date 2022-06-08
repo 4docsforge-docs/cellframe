@@ -79,7 +79,7 @@ dap_stream_pkt_t * dap_stream_pkt_detect(void * a_data, size_t data_size)
                 hpkt = NULL;
                 break;
             }
-            if(hpkt->hdr.size > STREAM_PKT_SIZE_MAX ){
+            if(hpkt->hdr.size > DAP_STREAM_PKT_SIZE_MAX ){
                 log_it(L_ERROR, "Too big packet size %u (%#x), type:%d(%#x)",
                        hpkt->hdr.size, hpkt->hdr.size, hpkt->hdr.type, hpkt->hdr.type);
                 hpkt = NULL;
@@ -125,9 +125,6 @@ size_t dap_stream_pkt_read_unsafe( dap_stream_t * a_stream, dap_stream_pkt_t * a
     return ds;
 }
 
-
-#define DAP_STREAM_CH_PKT_ENCRYPTION_OVERHEAD 200 //in fact is's about 2*16+15 for OAES
-
 /**
  * @brief stream_ch_pkt_write
  * @param ch
@@ -144,7 +141,7 @@ size_t dap_stream_pkt_write_unsafe(dap_stream_t * a_stream, const void * a_data,
 
     uint8_t * l_buf_allocated = NULL;
     uint8_t * l_buf_selected = a_stream->buf;
-    size_t  l_buf_size_required = a_data_size + DAP_STREAM_CH_PKT_ENCRYPTION_OVERHEAD;
+    size_t  l_buf_size_required = a_data_size + DAP_STREAM_PKT_ENCRYPTION_OVERHEAD;
 
     if(l_buf_size_required > sizeof(a_stream->buf) ){
         l_buf_allocated = DAP_NEW_SIZE(uint8_t, l_buf_size_required);

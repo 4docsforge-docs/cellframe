@@ -192,7 +192,7 @@ static bool s_timer_timeout_after_connected_check(void * a_arg)
         dap_client_http_pvt_t * l_http_pvt = PVT(l_es);
         assert(l_http_pvt);
         if ( time(NULL)- l_http_pvt->ts_last_read >= (time_t) s_client_timeout_read_after_connect_ms){
-            log_it(L_WARNING,"Read after connect timeout for request http://%s:%u/%s, possible uplink is on heavy load or DPI between you",
+            log_it(L_WARNING, "Timeout for reading after connect for request http://%s:%u/%s, possible uplink is on heavy load or DPI between you",
                    l_http_pvt->uplink_addr, l_http_pvt->uplink_port, l_http_pvt->path);
             if(l_http_pvt->error_callback) {
                 l_http_pvt->error_callback(ETIMEDOUT, l_http_pvt->obj);
@@ -384,7 +384,7 @@ static void s_es_delete(dap_events_socket_t * a_es, void * a_arg)
                l_client_http_internal->response_size, l_client_http_internal->content_length);
             l_client_http_internal->error_callback(-666, l_client_http_internal->obj); // -666 means remote server disconnected before he sends all
         }else if (l_response_size){
-            log_it(L_INFO, "Remote server replied without no content legth but we have the response %zd bytes size",
+            log_it(L_INFO, "Remote server replied without no content length but we have the response %zd bytes size",
                l_response_size);
 
             //l_client_http_internal->error_callback(-10 , l_client_http_internal->obj);
